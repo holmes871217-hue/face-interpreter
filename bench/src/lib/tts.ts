@@ -122,6 +122,10 @@ export const AUTO_VOICE: Record<Lang, string> = {
   zh: 'default_eaee7325255d4783', // Meilin zh F
 };
 
+export const VOICE_NAME: Record<string, string> = {
+  default_b7a257a5b1478493: 'Seoyeon', default_de4d191ca7574982: 'Savannah', default_eaee7325255d4783: 'Meilin', default_d8a9b688b64e638d: 'Haoran',
+};
+
 /** Upper bound on generated frames (15 Hz) from the text length, so a take that fails to stop cannot run for a minute. */
 export function frameCap(text: string, lang: Lang): number {
   const charsPerSec = lang === 'en' ? 9 : 3.5;   // deliberately slow speaking rates: the cap must not cut real speech
@@ -229,6 +233,9 @@ export interface VerifiedResult extends TtsResult {
  */
 export async function synthesizeVerified(text: string, lang: Lang, voice: VoiceRef,
   opts: { laci?: boolean; maxAttempts?: number; seed?: number; signal?: AbortSignal; play?: boolean } = {}): Promise<VerifiedResult> {
+  // Unlock audio now, while we are still inside the tap that started this: Android Chrome only lets audio start
+  // from a user gesture, and the take is played seconds later, after generation and checks.
+  if (opts.play !== false) await audioContext();
   const t0 = performance.now();
   const rejected: string[] = [];
   const max = opts.maxAttempts ?? 4;

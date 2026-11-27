@@ -5,8 +5,10 @@ import { encodeWav, MicCapture } from '../lib/audio';
 import { voices as voiceDb, type VoiceProfile } from '../lib/db';
 import { ZONOS_SIZES_MB } from '../lib/models';
 import { currentSeq, entriesSince } from '../lib/net';
-import { AUTO_VOICE, embedVoice, synthesizeVerified, listVoices, loadTts, synthesize, ttsFatal, type DefaultVoice, type EngineProgress, type TtsResult, type VoiceRef } from '../lib/tts';
+import { AUTO_VOICE, VOICE_NAME, embedVoice, synthesizeVerified, listVoices, loadTts, synthesize, ttsFatal, type DefaultVoice, type EngineProgress, type TtsResult, type VoiceRef } from '../lib/tts';
 import { fmtMs, record, setState, useStore } from '../store';
+import { logError, logNote, logTts } from '../lib/report';
+import { audioContext } from '../lib/audio';
 import { Badge, ErrorBox, KV, Progress, Section } from '../ui';
 
 export function useVoiceProfiles() {
@@ -59,13 +61,31 @@ export function TtsPanel() {
       setState({ ttsLoaded: true });
       setInfo(`ZONOS3-Mini 엔진 준비 완료 · ${fmtMs(r.ms)} (다운로드 포함 여부는 네트워크 탭 참조) · 기본 음성 ${v.length}개`);
       await record('load', { component: 'tts', model: 'ZONOS3-Mini web', ms: r.ms, defaultVoices: v.length });
-    } catch (e) { setErr(String(e) + (ttsFatal() ? `\n엔진: ${ttsFatal()}` : '')); }
+    } catch (e) {
+      setErr(String(e) + (ttsFatal() ? `\n엔진: ${ttsFatal()}` : ''));
+      logError('엔진 로드', ttsFatal() ? `${String(e)} / 엔진: ${ttsFatal()}` : e);
+      setProg(null);
+      return false;
+    }
     setProg(null);
+    return true;
+  };
+
+  /** One tap: unlock audio, load the engine if needed, then read the same sentence in all four languages (stable mode). */
+  const oneTap = async () => {
+    setErr(null);
+    try { await audioContext(); } catch (e) { logError('오디오 시작', e); }
+    setBusy(true);
+    logNote('원클릭 테스트 시작');
+    if (!ttsLoaded && !(await load())) { setBusy(false); return; }
+    for (const l of LANGS) await speakOnce(SENTENCES[4][l], l, voiceSel, laci);
+    logNote('원클릭 테스트 끝');
+    setBusy(false);
   };
 
   const voiceLabel = (sel: string, l: Lang) => {
-    if (sel === 'auto') { const id = AUTO_VOICE[l]; return (defaults.find(v => v.id === id)?.label ?? id).split(' ')[0]; }
-    if (sel.startsWith('default:')) return (defaults.find(v => 'default:' + v.id === sel)?.label ?? sel).split(' ')[0];
+    if (sel === 'auto') { const id = AUTO_VOICE[l]; return VOICE_NAME[id] ?? (defaults.find(v => v.id === id)?.label ?? id).split(' ')[0]; }
+    if (sel.startsWith('default:')) return VOICE_NAME[sel.slice(8)] ?? (defaults.find(v => 'default:' + v.id === sel)?.label ?? sel).split(' ')[0];
     return profiles.find(p => p.id === sel)?.name ?? sel;
   };
 
@@ -81,8 +101,14 @@ export function TtsPanel() {
       const net = entriesSince(seq).filter(e => !e.sameOrigin).length;
       const label = `${tag}${voiceLabel(sel, l)}${seed != null ? ` #${seed}` : ''}`;
       setResults(x => [{ ...r, lang: l, voice: label, text: t, net }, ...x]);
+      const v = r as typeof r & { attempts?: number; rejected?: string[]; ok?: boolean; readyMs?: number };
+      logTts({ at: new Date().toISOString(), lang: l, voice: label, chars: t.length, audioSec: r.audioSec, rmsDb: r.rmsDb, ok: v.ok,
+        attempts: v.attempts, rejected: v.rejected, readyMs: v.readyMs, ttfaMs: r.ttfaMs, rtf: r.rtf, laci: r.laci });
       await record('tts', { ...r, lang: l, voice: label, chars: t.length, prebufferSec: prebuf, seed: seed ?? 1234, crossOriginDuring: net });
-    } catch (e) { setErr(String(e) + (ttsFatal() ? `\n엔진: ${ttsFatal()}` : '')); }
+    } catch (e) {
+      setErr(String(e) + (ttsFatal() ? `\n엔진: ${ttsFatal()}` : ''));
+      logError(`합성 ${l}`, ttsFatal() ? `${String(e)} / 엔진: ${ttsFatal()}` : e);
+    }
   };
 
   const speak = async (t: string, l: Lang) => {
@@ -147,6 +173,13 @@ export function TtsPanel() {
 
   return (
     <>
+      <section className="card hero">
+        <h2>원클릭 테스트</h2>
+        <p className="note">한 번 누르면 엔진을 준비하고(처음 한 번만 몇 분) 같은 문장을 한국어·일본어·영어·중국어로 차례로 들려줍니다. 끝나면 맨 위 <b>📋 결과 복사</b>를 눌러 Claude 대화창에 붙여넣기 하세요.</p>
+        <button className="big" disabled={busy || !!prog} onClick={oneTap}>{busy || prog ? '진행 중… 화면을 켜 두세요' : '▶ 원클릭 테스트'}</button>
+        {prog && <Progress loaded={prog.loaded} total={prog.total} label={prog.models.join('+')} />}
+      </section>
+
       <Section title="ZONOS3-Mini (WebGPU, 기기 내 실행)"
         note={`최초 로드 시 backbone ${ZONOS_SIZES_MB.backbone} MB + 코덱 ${ZONOS_SIZES_MB.zac} MB + 기본 음성 ${ZONOS_SIZES_MB.voices} MB를 Hugging Face에서 받아 Cache Storage에 저장합니다. 음성 등록 시 화자 인코더 ${ZONOS_SIZES_MB.spk} MB가 추가됩니다(임베딩 모드). 2.6 GB 레퍼런스 인코더는 사용하지 않습니다.`}>
         <div className="row">

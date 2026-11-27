@@ -14,6 +14,7 @@ export default defineConfig({
   base: './',
   plugins: [react(), stripCspInDev()],
   worker: { format: 'es' },
+  define: { __BUILD__: JSON.stringify((process.env.GITHUB_SHA ?? 'local').slice(0, 7)) },
   build: { target: 'es2022', sourcemap: false, chunkSizeWarningLimit: 4000 },
   optimizeDeps: { exclude: ['@huggingface/transformers'] },
 });

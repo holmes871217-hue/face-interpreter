@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { registerSW } from './lib/net';
+import { installGlobalErrorCapture } from './lib/report';
+import { ReportBar } from './ReportBar';
 import { AsrPanel } from './panels/AsrPanel';
 import { DevicePanel } from './panels/DevicePanel';
 import { MtPanel } from './panels/MtPanel';
@@ -25,7 +27,7 @@ export function App() {
     tts: useStore(s => s.ttsLoaded),
   };
 
-  useEffect(() => { void registerSW().then(setSw); }, []);
+  useEffect(() => { installGlobalErrorCapture(); void registerSW().then(setSw); }, []);
   useEffect(() => { try { localStorage.setItem('tab', tab); } catch { /* private mode */ } }, [tab]);
 
   return (
@@ -39,6 +41,7 @@ export function App() {
           <span className={ready.asr ? 'on' : ''}>ASR</span><span className={ready.mt ? 'on' : ''}>MT</span><span className={ready.tts ? 'on' : ''}>TTS</span>
         </div>
       </header>
+      <ReportBar />
       <nav>{TABS.map(([k, l]) => <button key={k} className={tab === k ? 'active' : ''} onClick={() => setTab(k)}>{l}</button>)}</nav>
       <main>
         {/* Panels stay mounted so loaded state and running tests survive tab switches. */}

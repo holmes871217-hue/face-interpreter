@@ -65,3 +65,8 @@ tr.blocked td { background: color-mix(in srgb, var(--bad) 12%, transparent); }
 pre.raw { max-height: 380px; overflow: auto; font-size: 11px; }
 code { font-size: 12px; word-break: break-all; }
 footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 16px; }
+
+.reportbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 4px 0; }
+.reportbar .copy { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
+.reportbar textarea { width: 100%; font-size: 12px; }
+.hero { border: 2px solid var(--accent); }
