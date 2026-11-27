@@ -5,7 +5,7 @@ import { encodeWav, MicCapture } from '../lib/audio';
 import { voices as voiceDb, type VoiceProfile } from '../lib/db';
 import { ZONOS_SIZES_MB } from '../lib/models';
 import { currentSeq, entriesSince } from '../lib/net';
-import { embedVoice, listVoices, loadTts, synthesize, ttsFatal, type DefaultVoice, type EngineProgress, type TtsResult, type VoiceRef } from '../lib/tts';
+import { AUTO_VOICE, embedVoice, listVoices, loadTts, synthesize, ttsFatal, type DefaultVoice, type EngineProgress, type TtsResult, type VoiceRef } from '../lib/tts';
 import { fmtMs, record, setState, useStore } from '../store';
 import { Badge, ErrorBox, KV, Progress, Section } from '../ui';
 
@@ -62,18 +62,45 @@ export function TtsPanel() {
     setProg(null);
   };
 
-  const speak = async (t: string, l: Lang) => {
-    const ref = voiceRefOf(voiceSel, profiles);
+  const voiceLabel = (sel: string, l: Lang) => {
+    if (sel === 'auto') { const id = AUTO_VOICE[l]; return (defaults.find(v => v.id === id)?.label ?? id).split(' ')[0]; }
+    if (sel.startsWith('default:')) return (defaults.find(v => 'default:' + v.id === sel)?.label ?? sel).split(' ')[0];
+    return profiles.find(p => p.id === sel)?.name ?? sel;
+  };
+
+  const speakOnce = async (t: string, l: Lang, sel: string, useLaci: boolean, seed?: number, tag = '') => {
+    const ref = voiceRefOf(sel, profiles);
     if (!ref) { setErr('출력 목소리를 선택하세요'); return; }
-    setBusy(true); setErr(null);
     const seq = currentSeq();
     try {
-      const r = await synthesize(t, l, ref, { play: true, laci, prebufferSec: prebuf });
+      const r = await synthesize(t, l, ref, { play: true, laci: useLaci, prebufferSec: prebuf, seed });
       await new Promise(res => setTimeout(res, 300));
       const net = entriesSince(seq).filter(e => !e.sameOrigin).length;
-      setResults(x => [{ ...r, lang: l, voice: voiceSel, text: t, net }, ...x]);
-      await record('tts', { ...r, lang: l, voice: ref.kind === 'default' ? ref.id : ref.kind, chars: t.length, prebufferSec: prebuf, crossOriginDuring: net });
+      const label = `${tag}${voiceLabel(sel, l)}${seed != null ? ` #${seed}` : ''}`;
+      setResults(x => [{ ...r, lang: l, voice: label, text: t, net }, ...x]);
+      await record('tts', { ...r, lang: l, voice: label, chars: t.length, prebufferSec: prebuf, seed: seed ?? 1234, crossOriginDuring: net });
     } catch (e) { setErr(String(e) + (ttsFatal() ? `\n엔진: ${ttsFatal()}` : '')); }
+  };
+
+  const speak = async (t: string, l: Lang) => {
+    setBusy(true); setErr(null);
+    await speakOnce(t, l, voiceSel, laci);
+    setBusy(false);
+  };
+
+  /** Chinese diagnosis: voice x LACI x seed, so a listener can tell which factor breaks the take. */
+  const zhDiag = async () => {
+    setBusy(true); setErr(null);
+    const t = SENTENCES[4].zh;
+    const meilin = 'default:' + AUTO_VOICE.zh, haoran = 'default:default_d8a9b688b64e638d';
+    const plan: [string, boolean, number, string][] = [
+      [meilin, true, 1, 'A '], [meilin, false, 1, 'B '], [haoran, true, 1, 'C '], [haoran, false, 1, 'D '],
+      [meilin, true, 2, 'E '], [meilin, true, 1, 'F '],   // F repeats A exactly: same seed should give the same take
+    ];
+    for (const [sel, useLaci, seed, tag] of plan) {
+      await speakOnce(t, 'zh', sel, useLaci, seed, tag);
+      await new Promise(res => setTimeout(res, 1200));   // a pause so each take can be told apart by ear
+    }
     setBusy(false);
   };
 
@@ -143,7 +170,7 @@ export function TtsPanel() {
             {LANGS.map(l => <option key={l} value={l}>{LANG_LABEL[l]}</option>)}
           </select>
           {SENTENCES.slice(0, 6).map((s, i) => <button key={i} className="chip" onClick={() => setText(s[lang])}>{i + 1}</button>)}
-          <button className="chip" disabled={!ttsLoaded || busy} onClick={async () => { for (let i = 0; i < 3; i++) await speak(SENTENCES[4].zh, 'zh'); }}>중국어만 3회</button>
+          <button className="chip" disabled={!ttsLoaded || busy} onClick={zhDiag}>중국어 진단(A~F)</button>
         </div>
         <textarea rows={2} value={text} onChange={e => setText(e.target.value)} />
         <div className="row">
@@ -156,9 +183,9 @@ export function TtsPanel() {
         </div>
         <p className="note">브라우저 엔진에서는 텍스트 정규화(숫자→읽는 말)가 꺼져 있습니다(공식 README). 숫자는 글자로 풀어 쓰는 전처리가 필요할 수 있습니다.</p>
         <table className="grid">
-          <thead><tr><th>언어</th><th>문장</th><th>첫 음성(TTFA)</th><th>스피커 출력 시작</th><th>합성 완료</th><th>음성 길이</th><th>RTF</th><th>음량</th><th>끊김</th><th>LACI</th><th>외부요청</th></tr></thead>
+          <thead><tr><th>언어</th><th>목소리</th><th>문장</th><th>첫 음성(TTFA)</th><th>스피커 출력 시작</th><th>합성 완료</th><th>음성 길이</th><th>RTF</th><th>음량</th><th>끊김</th><th>LACI</th><th>외부요청</th></tr></thead>
           <tbody>{results.map((r, i) => (
-            <tr key={i}><td>{r.lang}</td><td>{r.text}</td><td>{fmtMs(r.ttfaMs)}</td><td>{fmtMs(r.firstPlayMs)}</td><td>{fmtMs(r.totalMs)}</td>
+            <tr key={i}><td>{r.lang}</td><td><b>{r.voice}</b></td><td>{r.text}</td><td>{fmtMs(r.ttfaMs)}</td><td>{fmtMs(r.firstPlayMs)}</td><td>{fmtMs(r.totalMs)}</td>
               <td>{r.audioSec.toFixed(1)} s</td><td className={r.rtf < 1 ? 'ok' : 'bad'}>{r.rtf.toFixed(2)}</td>
               <td className={r.rmsDb < -45 ? 'bad' : 'ok'}>{r.rmsDb.toFixed(0)} dB{r.rmsDb < -45 ? <div>거의 무음</div> : null}{r.nonFinite ? <div className="bad">깨진 값 {r.nonFinite}</div> : null}</td>
               <td className={r.underruns ? 'bad' : 'ok'}>{r.underruns}회{r.gapSec > 0.05 ? ` (${r.gapSec.toFixed(1)} s)` : ''}</td>
