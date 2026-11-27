@@ -1,7 +1,7 @@
 /** ZONOS3-Mini through its official in-browser engine (WebGPU, Web Worker). The engine serves its HTTP-shaped API
  *  in-process via `localFetch`: requests to /v2/* never touch the network. */
 import { CODES, type Lang } from '../data/languages';
-import { audioContext, StreamPlayer } from './audio';
+import { audioContext, concat, playPcm, StreamPlayer } from './audio';
 import { ZONOS_BASE } from './models';
 
 interface EngineModule {
@@ -111,6 +111,7 @@ export interface TtsResult {
   rmsDb: number;           // loudness of the whole take (dBFS); speech is typically -30..-15, silence below -50
   peak: number;            // max |sample|
   nonFinite: number;       // NaN/Inf samples replaced by 0
+  pcm?: Float32Array;      // whole take, when keepPcm
 }
 
 /** Default voice per language (ZONOS3-Mini ships no Japanese voice; a Korean female voice is used for ja). */
@@ -127,7 +128,7 @@ export function frameCap(text: string, lang: Lang): number {
   return Math.ceil(15 * (2 + text.length / charsPerSec));
 }
 
-export interface SynthOptions { play: boolean; seed?: number; signal?: AbortSignal; laci?: boolean; prebufferSec?: number }
+export interface SynthOptions { play: boolean; seed?: number; signal?: AbortSignal; laci?: boolean; prebufferSec?: number; keepPcm?: boolean }
 
 export async function synthesize(text: string, lang: Lang, voice: VoiceRef, opts: SynthOptions = { play: true }): Promise<TtsResult> {
   const cap = frameCap(text, lang);
@@ -161,6 +162,7 @@ export async function synthesize(text: string, lang: Lang, voice: VoiceRef, opts
   let carry = new Uint8Array(0);
   let samples = 0;
   let sumSq = 0, peak = 0, nonFinite = 0;
+  const kept: Float32Array[] = [];
   for (;;) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -178,6 +180,7 @@ export async function synthesize(text: string, lang: Lang, voice: VoiceRef, opts
       if (!Number.isFinite(x)) { nonFinite++; f[i] = 0; continue; }
       sumSq += x * x; const a = Math.abs(x); if (a > peak) peak = a;
     }
+    if (opts.keepPcm) kept.push(f);
     player?.push(f);
   }
   player?.end();
@@ -190,5 +193,58 @@ export async function synthesize(text: string, lang: Lang, voice: VoiceRef, opts
     totalMs, audioSec, rtf: audioSec > 0 ? totalMs / 1000 / audioSec : NaN, playbackEndMs,
     underruns: player?.underruns ?? 0, gapSec: player?.gapSec ?? 0, laci, capped: audioSec * 15 >= cap - 2,
     rmsDb: samples ? 10 * Math.log10(sumSq / samples + 1e-12) : -120, peak, nonFinite,
+    pcm: opts.keepPcm ? concat(kept) : undefined,
   };
+}
+
+/** Speaking rates measured on the Galaxy S22 Ultra with the default voices (chars per second, 2026-11-27). */
+const CHARS_PER_SEC: Record<Lang, number> = { ko: 5.5, ja: 7.5, en: 14, zh: 5.5 };
+
+export function expectedSec(text: string, lang: Lang): number {
+  return [...text.replace(/\s+/g, ' ')].length / CHARS_PER_SEC[lang];
+}
+
+/** Why a take is rejected, or null when it looks like a complete, audible reading of the text. */
+export function takeProblem(r: TtsResult, text: string, lang: Lang): string | null {
+  const exp = expectedSec(text, lang);
+  if (r.nonFinite > 0) return '깨진 값';
+  if (r.rmsDb < -40) return '무음';
+  if (r.capped) return '늘어짐(상한 도달)';
+  if (r.audioSec < Math.max(0.5, exp * 0.6 - 0.3)) return `잘림(${r.audioSec.toFixed(1)}s, 예상 ${exp.toFixed(1)}s)`;
+  if (r.audioSec > exp * 1.8 + 1) return `늘어짐(${r.audioSec.toFixed(1)}s, 예상 ${exp.toFixed(1)}s)`;
+  return null;
+}
+
+export interface VerifiedResult extends TtsResult {
+  attempts: number;
+  rejected: string[];       // why earlier takes were thrown away
+  ok: boolean;              // false when every attempt failed (the last take is played anyway)
+  readyMs: number;          // request → verified take ready to play (all attempts)
+}
+
+/**
+ * "Stable mode": generate the whole take without playing it, check length/loudness, retry with a new seed when
+ * it is truncated, runaway or silent, then play the first good take. Costs latency (no streaming) but the
+ * listener never hears a broken take. Workaround for unstable generation on some phone GPUs.
+ */
+export async function synthesizeVerified(text: string, lang: Lang, voice: VoiceRef,
+  opts: { laci?: boolean; maxAttempts?: number; seed?: number; signal?: AbortSignal; play?: boolean } = {}): Promise<VerifiedResult> {
+  const t0 = performance.now();
+  const rejected: string[] = [];
+  const max = opts.maxAttempts ?? 4;
+  let last: TtsResult | null = null;
+  for (let i = 0; i < max; i++) {
+    const r = await synthesize(text, lang, voice, { play: false, keepPcm: true, laci: opts.laci, seed: (opts.seed ?? 1234) + i * 7919, signal: opts.signal });
+    last = r;
+    const prob = takeProblem(r, text, lang);
+    if (!prob) {
+      const readyMs = performance.now() - t0;
+      if (opts.play !== false && r.pcm) await playPcm(r.pcm, SAMPLE_RATE);
+      return { ...r, attempts: i + 1, rejected, ok: true, readyMs, firstPlayMs: readyMs, playbackEndMs: performance.now() - t0, pcm: undefined };
+    }
+    rejected.push(prob);
+  }
+  const readyMs = performance.now() - t0;
+  if (opts.play !== false && last?.pcm) await playPcm(last.pcm, SAMPLE_RATE);
+  return { ...last!, attempts: max, rejected, ok: false, readyMs, firstPlayMs: readyMs, playbackEndMs: performance.now() - t0, pcm: undefined };
 }

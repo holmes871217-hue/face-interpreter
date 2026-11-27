@@ -5,7 +5,7 @@ import { encodeWav, MicCapture } from '../lib/audio';
 import { voices as voiceDb, type VoiceProfile } from '../lib/db';
 import { ZONOS_SIZES_MB } from '../lib/models';
 import { currentSeq, entriesSince } from '../lib/net';
-import { AUTO_VOICE, embedVoice, listVoices, loadTts, synthesize, ttsFatal, type DefaultVoice, type EngineProgress, type TtsResult, type VoiceRef } from '../lib/tts';
+import { AUTO_VOICE, embedVoice, synthesizeVerified, listVoices, loadTts, synthesize, ttsFatal, type DefaultVoice, type EngineProgress, type TtsResult, type VoiceRef } from '../lib/tts';
 import { fmtMs, record, setState, useStore } from '../store';
 import { Badge, ErrorBox, KV, Progress, Section } from '../ui';
 
@@ -33,10 +33,11 @@ export function TtsPanel() {
   const { list: profiles, refresh } = useVoiceProfiles();
   const [voiceSel, setVoiceSel] = useState('auto');
   const [laci, setLaci] = useState(true);
+  const [stable, setStable] = useState(true);
   const [prebuf, setPrebuf] = useState(0.4);
   const [lang, setLang] = useState<Lang>('ja');
   const [text, setText] = useState(SENTENCES[0].ja);
-  const [results, setResults] = useState<(TtsResult & { lang: Lang; voice: string; text: string; net: number })[]>([]);
+  const [results, setResults] = useState<(TtsResult & { lang: Lang; voice: string; text: string; net: number; attempts?: number; rejected?: string[]; ok?: boolean })[]>([]);
   const [busy, setBusy] = useState(false);
 
   // enrolment
@@ -73,7 +74,9 @@ export function TtsPanel() {
     if (!ref) { setErr('출력 목소리를 선택하세요'); return; }
     const seq = currentSeq();
     try {
-      const r = await synthesize(t, l, ref, { play: true, laci: useLaci, prebufferSec: prebuf, seed });
+      const r = stable
+        ? await synthesizeVerified(t, l, ref, { laci: useLaci, seed })
+        : await synthesize(t, l, ref, { play: true, laci: useLaci, prebufferSec: prebuf, seed });
       await new Promise(res => setTimeout(res, 300));
       const net = entriesSince(seq).filter(e => !e.sameOrigin).length;
       const label = `${tag}${voiceLabel(sel, l)}${seed != null ? ` #${seed}` : ''}`;
@@ -178,18 +181,20 @@ export function TtsPanel() {
           <button disabled={!ttsLoaded || busy} onClick={async () => { for (const l of LANGS) await speak(SENTENCES[4][l], l); }}>4개 언어 연속 테스트</button>
         </div>
         <div className="row">
+          <label className="radio"><input type="checkbox" checked={stable} onChange={e => setStable(e.target.checked)} /><b>안정 모드</b>(다 만든 뒤 검사, 잘림·무음이면 다시 만들어 재생)</label>
           <label className="radio"><input type="checkbox" checked={laci} onChange={e => setLaci(e.target.checked)} />LACI(말 늘어짐·잘림 방지)</label>
           재생 버퍼 <select value={prebuf} onChange={e => setPrebuf(Number(e.target.value))}>{[0, 0.2, 0.4, 0.8, 1.5].map(v => <option key={v} value={v}>{v} 초</option>)}</select>
         </div>
         <p className="note">브라우저 엔진에서는 텍스트 정규화(숫자→읽는 말)가 꺼져 있습니다(공식 README). 숫자는 글자로 풀어 쓰는 전처리가 필요할 수 있습니다.</p>
         <table className="grid">
-          <thead><tr><th>언어</th><th>목소리</th><th>문장</th><th>첫 음성(TTFA)</th><th>스피커 출력 시작</th><th>합성 완료</th><th>음성 길이</th><th>RTF</th><th>음량</th><th>끊김</th><th>LACI</th><th>외부요청</th></tr></thead>
+          <thead><tr><th>언어</th><th>목소리</th><th>문장</th><th>첫 음성(TTFA)</th><th>스피커 출력 시작</th><th>합성 완료</th><th>음성 길이</th><th>RTF</th><th>음량</th><th>끊김</th><th>LACI</th><th>검사</th><th>외부요청</th></tr></thead>
           <tbody>{results.map((r, i) => (
             <tr key={i}><td>{r.lang}</td><td><b>{r.voice}</b></td><td>{r.text}</td><td>{fmtMs(r.ttfaMs)}</td><td>{fmtMs(r.firstPlayMs)}</td><td>{fmtMs(r.totalMs)}</td>
               <td>{r.audioSec.toFixed(1)} s</td><td className={r.rtf < 1 ? 'ok' : 'bad'}>{r.rtf.toFixed(2)}</td>
               <td className={r.rmsDb < -45 ? 'bad' : 'ok'}>{r.rmsDb.toFixed(0)} dB{r.rmsDb < -45 ? <div>거의 무음</div> : null}{r.nonFinite ? <div className="bad">깨진 값 {r.nonFinite}</div> : null}</td>
               <td className={r.underruns ? 'bad' : 'ok'}>{r.underruns}회{r.gapSec > 0.05 ? ` (${r.gapSec.toFixed(1)} s)` : ''}</td>
               <td>{r.laci ? 'O' : 'X'}{r.capped ? <div className="bad">길이 제한 도달</div> : null}</td>
+              <td>{r.attempts == null ? '—' : <span className={r.ok ? 'ok' : 'bad'}>{r.ok ? '통과' : '실패'} ({r.attempts}번째){r.rejected?.length ? <div className="note">버림: {r.rejected.join(', ')}</div> : null}</span>}</td>
               <td className={r.net ? 'bad' : 'ok'}>{r.net}</td></tr>
           ))}</tbody>
         </table>

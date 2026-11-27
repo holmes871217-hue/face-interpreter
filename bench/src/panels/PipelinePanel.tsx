@@ -3,7 +3,7 @@ import { LANG_LABEL, LANGS, type Lang } from '../data/languages';
 import { MicCapture, resample, trimToSpeech } from '../lib/audio';
 import { ASR_CANDIDATES, MT_CANDIDATES, runAsr, translate } from '../lib/engines';
 import { currentSeq, entriesSince } from '../lib/net';
-import { synthesize } from '../lib/tts';
+import { synthesizeVerified } from '../lib/tts';
 import { fmtMs, record, setState, useStore } from '../store';
 import { ErrorBox, Section } from '../ui';
 import { useVoiceProfiles, voiceRefOf } from './TtsPanel';
@@ -76,14 +76,15 @@ export function PipelinePanel() {
       abort.current = new AbortController();
       const tTts = performance.now();
       // Microphone is closed at this point; nothing records while the translation is played (echo prevention).
-      const p = synthesize(m.text, tgt, ref, { play: true, signal: abort.current.signal });
+      // Stable mode: whole take, checked for truncation/silence/runaway, retried before anything is played.
+      const p = synthesizeVerified(m.text, tgt, ref, { signal: abort.current.signal });
       setPhase('speaking');
       const tr = await p;
       t.ttfa = tr.ttfaMs;
       t.firstPlay = tr.firstPlayMs;
       t.toFirstAudio = tr.firstPlayMs != null ? tTts - tEnd + tr.firstPlayMs : null;
       t.toPlaybackEnd = tr.playbackEndMs != null ? tTts - tEnd + tr.playbackEndMs : null;
-      row.status = '재생 완료';
+      row.status = tr.ok ? `재생 완료${tr.attempts > 1 ? ` (${tr.attempts}번째 합성 사용)` : ''}` : `재생(검사 실패: ${tr.rejected.join(', ')})`;
     } catch (e) {
       row.status = '실패: ' + (e instanceof Error ? e.message : String(e));
       if (!String(e).includes('중단')) setErr(String(e));
