@@ -108,6 +108,9 @@ export interface TtsResult {
   gapSec: number;          // total silence inserted by those gaps
   laci: boolean;           // alignment-guarded decoding was used
   capped: boolean;         // hit the length cap (runaway generation)
+  rmsDb: number;           // loudness of the whole take (dBFS); speech is typically -30..-15, silence below -50
+  peak: number;            // max |sample|
+  nonFinite: number;       // NaN/Inf samples replaced by 0
 }
 
 /** Default voice per language (ZONOS3-Mini ships no Japanese voice; a Korean female voice is used for ja). */
@@ -157,6 +160,7 @@ export async function synthesize(text: string, lang: Lang, voice: VoiceRef, opts
   let ttfa = -1;
   let carry = new Uint8Array(0);
   let samples = 0;
+  let sumSq = 0, peak = 0, nonFinite = 0;
   for (;;) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -168,6 +172,12 @@ export async function synthesize(text: string, lang: Lang, voice: VoiceRef, opts
     const f = new Float32Array(joined.slice(0, usable).buffer);
     carry = joined.slice(usable);
     samples += f.length;
+    for (let i = 0; i < f.length; i++) {
+      const x = f[i];
+      // A broken GPU computation can yield NaN/Inf samples, which the speaker plays as silence or clicks.
+      if (!Number.isFinite(x)) { nonFinite++; f[i] = 0; continue; }
+      sumSq += x * x; const a = Math.abs(x); if (a > peak) peak = a;
+    }
     player?.push(f);
   }
   player?.end();
@@ -179,5 +189,6 @@ export async function synthesize(text: string, lang: Lang, voice: VoiceRef, opts
     ttfaMs: ttfa, firstPlayMs: player?.firstPlayAt ? player.firstPlayAt - t0 : null,
     totalMs, audioSec, rtf: audioSec > 0 ? totalMs / 1000 / audioSec : NaN, playbackEndMs,
     underruns: player?.underruns ?? 0, gapSec: player?.gapSec ?? 0, laci, capped: audioSec * 15 >= cap - 2,
+    rmsDb: samples ? 10 * Math.log10(sumSq / samples + 1e-12) : -120, peak, nonFinite,
   };
 }

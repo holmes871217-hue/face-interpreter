@@ -143,6 +143,7 @@ export function TtsPanel() {
             {LANGS.map(l => <option key={l} value={l}>{LANG_LABEL[l]}</option>)}
           </select>
           {SENTENCES.slice(0, 6).map((s, i) => <button key={i} className="chip" onClick={() => setText(s[lang])}>{i + 1}</button>)}
+          <button className="chip" disabled={!ttsLoaded || busy} onClick={async () => { for (let i = 0; i < 3; i++) await speak(SENTENCES[4].zh, 'zh'); }}>중국어만 3회</button>
         </div>
         <textarea rows={2} value={text} onChange={e => setText(e.target.value)} />
         <div className="row">
@@ -155,16 +156,17 @@ export function TtsPanel() {
         </div>
         <p className="note">브라우저 엔진에서는 텍스트 정규화(숫자→읽는 말)가 꺼져 있습니다(공식 README). 숫자는 글자로 풀어 쓰는 전처리가 필요할 수 있습니다.</p>
         <table className="grid">
-          <thead><tr><th>언어</th><th>문장</th><th>첫 음성(TTFA)</th><th>스피커 출력 시작</th><th>합성 완료</th><th>음성 길이</th><th>RTF</th><th>끊김</th><th>LACI</th><th>외부요청</th></tr></thead>
+          <thead><tr><th>언어</th><th>문장</th><th>첫 음성(TTFA)</th><th>스피커 출력 시작</th><th>합성 완료</th><th>음성 길이</th><th>RTF</th><th>음량</th><th>끊김</th><th>LACI</th><th>외부요청</th></tr></thead>
           <tbody>{results.map((r, i) => (
             <tr key={i}><td>{r.lang}</td><td>{r.text}</td><td>{fmtMs(r.ttfaMs)}</td><td>{fmtMs(r.firstPlayMs)}</td><td>{fmtMs(r.totalMs)}</td>
               <td>{r.audioSec.toFixed(1)} s</td><td className={r.rtf < 1 ? 'ok' : 'bad'}>{r.rtf.toFixed(2)}</td>
+              <td className={r.rmsDb < -45 ? 'bad' : 'ok'}>{r.rmsDb.toFixed(0)} dB{r.rmsDb < -45 ? <div>거의 무음</div> : null}{r.nonFinite ? <div className="bad">깨진 값 {r.nonFinite}</div> : null}</td>
               <td className={r.underruns ? 'bad' : 'ok'}>{r.underruns}회{r.gapSec > 0.05 ? ` (${r.gapSec.toFixed(1)} s)` : ''}</td>
               <td>{r.laci ? 'O' : 'X'}{r.capped ? <div className="bad">길이 제한 도달</div> : null}</td>
               <td className={r.net ? 'bad' : 'ok'}>{r.net}</td></tr>
           ))}</tbody>
         </table>
-        <p className="note">끊김 = 재생 도중 음성이 바닥나 멈춘 횟수(소리가 툭툭 끊기는 원인). RTF &lt; 1 이면 실시간보다 빠름. 첫 합성은 셰이더 컴파일 때문에 느릴 수 있으니 2회 이상 측정하세요.</p>
+        <p className="note">음량: 보통 말소리는 -30 ~ -15 dB, -45 dB 아래는 거의 무음. 끊김 = 재생 도중 음성이 바닥나 멈춘 횟수(소리가 툭툭 끊기는 원인). RTF &lt; 1 이면 실시간보다 빠름. 첫 합성은 셰이더 컴파일 때문에 느릴 수 있으니 2회 이상 측정하세요.</p>
       </Section>
 
       <Section title="음성 프로필 등록" note="원본 녹음은 프로필 생성 직후 버립니다. 기기에는 192차원 화자 임베딩만 IndexedDB에 저장됩니다.">
