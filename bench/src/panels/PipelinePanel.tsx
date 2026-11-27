@@ -16,7 +16,7 @@ interface Turn {
 }
 
 export function PipelinePanel() {
-  const { langA, langB, asrId, mtId, mtPivot, asrLoaded, mtLoaded, ttsLoaded, hangoverMs } = useStore(s => s);
+  const { langA, langB, asrId, mtId, mtPivot, mtNoRepeat, asrLoaded, mtLoaded, ttsLoaded, hangoverMs } = useStore(s => s);
   const { list: profiles } = useVoiceProfiles();
   const [voiceAB, setVoiceAB] = useState('');
   const [voiceBA, setVoiceBA] = useState('');
@@ -73,7 +73,7 @@ export function PipelinePanel() {
       if (!a.text) throw new Error('인식된 말이 없습니다');
       upsert(row);
       setPhase('mt');
-      const m = await translate(mt, a.text, src, tgt, mtPivot);
+      const m = await translate(mt, a.text, src, tgt, mtPivot, mtNoRepeat);
       t.mt = m.ms; row.translation = m.text;
       upsert(row);
       setPhase('tts');

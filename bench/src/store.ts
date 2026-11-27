@@ -12,6 +12,7 @@ export interface State {
   mtId: string;
   mtLoaded: string[];
   mtPivot: boolean;
+  mtNoRepeat: boolean;            // seq2seq decoding guard against repetition loops
   ttsLoaded: boolean;
   langA: Lang;
   langB: Lang;
@@ -20,7 +21,7 @@ export interface State {
 }
 
 let state: State = {
-  device: null, backend: 'webgpu', asrId: 'whisper-base', asrLoaded: {}, mtId: 'hymt3-1.8b', mtLoaded: [], mtPivot: false,
+  device: null, backend: 'webgpu', asrId: 'whisper-base', asrLoaded: {}, mtId: 'hymt3-1.8b', mtLoaded: [], mtPivot: false, mtNoRepeat: true,
   ttsLoaded: false, langA: 'ko', langB: 'ja', hangoverMs: 700, busy: null,
 };
 const subs = new Set<() => void>();

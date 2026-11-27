@@ -9,7 +9,7 @@ import { ErrorBox, KV, Progress, Section } from '../ui';
 interface Row { model: string; src: Lang; tgt: Lang; source: string; output: string; reference: string; ms: number; pivot?: string; tokens: number }
 
 export function MtPanel() {
-  const { mtId, backend, device, mtLoaded, mtPivot } = useStore(s => s);
+  const { mtId, backend, device, mtLoaded, mtPivot, mtNoRepeat } = useStore(s => s);
   const cand = MT_CANDIDATES.find(c => c.id === mtId)!;
   const [prog, setProg] = useState<LoadProgress | null>(null);
   const [info, setInfo] = useState('');
@@ -42,10 +42,10 @@ export function MtPanel() {
     try {
       for (const [src, tgt] of DIRECTIONS) {
         for (const s of SENTENCES.slice(0, count)) {
-          const r = await translate(cand, s[src], src, tgt, mtPivot);
+          const r = await translate(cand, s[src], src, tgt, mtPivot, mtNoRepeat);
           const row: Row = { model: cand.id, src, tgt, source: s[src], output: r.text, reference: s[tgt], ms: r.ms, pivot: r.pivot?.text, tokens: r.newTokens };
           setRows(x => [...x, row]);
-          await record('mt', { ...row, pivotMode: mtPivot, backend: dev });
+          await record('mt', { ...row, pivotMode: mtPivot, noRepeat: mtNoRepeat, backend: dev });
         }
       }
       await new Promise(res => setTimeout(res, 300));
@@ -69,6 +69,7 @@ export function MtPanel() {
             {MT_CANDIDATES.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
           </select>
           <label className="radio"><input type="checkbox" checked={mtPivot} onChange={e => setState({ mtPivot: e.target.checked })} />영어 경유(피벗) 번역</label>
+          {cand.kind !== 'hymt' && <label className="radio"><input type="checkbox" checked={mtNoRepeat} onChange={e => setState({ mtNoRepeat: e.target.checked })} />반복 출력 방지(no_repeat_ngram=3)</label>}
         </div>
         <KV rows={[['다운로드(추정)', cand.approxMB], ['라이선스', cand.license], ['실행 장치', dev], ['비고', cand.note ?? '—']]} />
         {unsupported && <p className="error">이 기기에서는 실행 조건(WebGPU{cand.kind === 'hymt' ? ' + shader-f16' : ''})을 충족하지 않습니다.</p>}
@@ -89,7 +90,7 @@ export function MtPanel() {
         <textarea value={free} onChange={e => setFree(e.target.value)} rows={2} placeholder="번역할 문장" />
         <button disabled={!loaded || !free.trim() || fs === ft} onClick={async () => {
           try {
-            const r = await translate(cand, free.trim(), fs, ft, mtPivot);
+            const r = await translate(cand, free.trim(), fs, ft, mtPivot, mtNoRepeat);
             setRows(x => [{ model: cand.id, src: fs, tgt: ft, source: free.trim(), output: r.text, reference: '', ms: r.ms, pivot: r.pivot?.text, tokens: r.newTokens }, ...x]);
           } catch (e) { setErr(String(e)); }
         }}>번역</button>

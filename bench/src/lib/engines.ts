@@ -73,11 +73,11 @@ export function hymtPrompt(text: string, src: Lang, tgt: Lang): string {
   return `Translate the following text into ${CODES.hymtEn[tgt]}. Note that you should only output the translated result without any additional explanation:\n\n${text}`;
 }
 
-async function translateOnce(c: MtCandidate, text: string, src: Lang, tgt: Lang) {
+async function translateOnce(c: MtCandidate, text: string, src: Lang, tgt: Lang, noRepeat: boolean) {
   const codes = c.kind === 'seq2seq-nllb' ? CODES.nllb : CODES.m2m100;
   const r = await mtWorker().call({
     type: 'run', repo: c.repo, kind: c.kind, text,
-    src: codes[src], tgt: codes[tgt], prompt: c.kind === 'hymt' ? hymtPrompt(text, src, tgt) : undefined,
+    src: codes[src], tgt: codes[tgt], prompt: c.kind === 'hymt' ? hymtPrompt(text, src, tgt) : undefined, noRepeat,
   });
   return { text: String(r.text), ms: Number(r.ms), newTokens: Number(r.newTokens ?? 0) };
 }
@@ -85,10 +85,10 @@ async function translateOnce(c: MtCandidate, text: string, src: Lang, tgt: Lang)
 export interface MtResult { text: string; ms: number; newTokens: number; pivot?: { text: string; ms: number } }
 
 /** Direct translation, or via English (pivot) when requested and neither side is English. */
-export async function translate(c: MtCandidate, text: string, src: Lang, tgt: Lang, pivot = false): Promise<MtResult> {
-  if (!pivot || src === 'en' || tgt === 'en') return translateOnce(c, text, src, tgt);
-  const a = await translateOnce(c, text, src, 'en');
-  const b = await translateOnce(c, a.text, 'en', tgt);
+export async function translate(c: MtCandidate, text: string, src: Lang, tgt: Lang, pivot = false, noRepeat = true): Promise<MtResult> {
+  if (!pivot || src === 'en' || tgt === 'en') return translateOnce(c, text, src, tgt, noRepeat);
+  const a = await translateOnce(c, text, src, 'en', noRepeat);
+  const b = await translateOnce(c, a.text, 'en', tgt, noRepeat);
   return { text: b.text, ms: a.ms + b.ms, newTokens: a.newTokens + b.newTokens, pivot: { text: a.text, ms: a.ms } };
 }
 

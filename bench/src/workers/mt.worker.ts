@@ -8,7 +8,7 @@ import { configureTransformers, errMsg, progressAggregator } from './common';
 type Kind = 'seq2seq-m2m' | 'seq2seq-nllb' | 'hymt';
 type In =
   | { type: 'load'; reqId: number; repo: string; kind: Kind; device: 'webgpu' | 'wasm'; dtype: Record<string, string> | string; ortBase: string }
-  | { type: 'run'; reqId: number; repo: string; kind: Kind; text: string; src: string; tgt: string; prompt?: string }
+  | { type: 'run'; reqId: number; repo: string; kind: Kind; text: string; src: string; tgt: string; prompt?: string; noRepeat?: boolean }
   | { type: 'unload'; reqId: number };
 
 const seq2seq = new Map<string, TranslationPipeline>();
@@ -51,7 +51,10 @@ self.onmessage = async (e: MessageEvent<In>) => {
       } else {
         const p = seq2seq.get(m.repo);
         if (!p) throw new Error('model not loaded: ' + m.repo);
-        const out = await p(m.text, { src_lang: m.src, tgt_lang: m.tgt, max_new_tokens: 256 } as never) as { translation_text: string }[];
+        // Container test (2026-11-27): M2M100 en→zh looped on one token until max length; no_repeat_ngram_size guards it.
+        const maxNew = Math.min(256, 16 + m.text.length * 3);
+        const gen = m.noRepeat ? { no_repeat_ngram_size: 3, repetition_penalty: 1.1 } : {};
+        const out = await p(m.text, { src_lang: m.src, tgt_lang: m.tgt, max_new_tokens: maxNew, ...gen } as never) as { translation_text: string }[];
         text = out[0]?.translation_text ?? '';
       }
       post({ type: 'result', reqId: m.reqId, text: text.trim(), ms: performance.now() - t0, newTokens });
