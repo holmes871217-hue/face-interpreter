@@ -3,7 +3,7 @@ import { LANG_LABEL, LANGS, type Lang } from '../data/languages';
 import { MicCapture, resample, trimToSpeech } from '../lib/audio';
 import { ASR_CANDIDATES, MT_CANDIDATES, runAsr, translate } from '../lib/engines';
 import { currentSeq, entriesSince } from '../lib/net';
-import { listVoices, synthesize } from '../lib/tts';
+import { synthesize } from '../lib/tts';
 import { fmtMs, record, setState, useStore } from '../store';
 import { ErrorBox, Section } from '../ui';
 import { useVoiceProfiles, voiceRefOf } from './TtsPanel';
@@ -18,8 +18,8 @@ interface Turn {
 export function PipelinePanel() {
   const { langA, langB, asrId, mtId, mtPivot, mtNoRepeat, asrLoaded, mtLoaded, ttsLoaded, hangoverMs } = useStore(s => s);
   const { list: profiles } = useVoiceProfiles();
-  const [voiceAB, setVoiceAB] = useState('');
-  const [voiceBA, setVoiceBA] = useState('');
+  const [voiceAB, setVoiceAB] = useState('auto');
+  const [voiceBA, setVoiceBA] = useState('auto');
   const [phase, setPhase] = useState<Phase>('idle');
   const [side, setSide] = useState<'A' | 'B' | null>(null);
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -37,7 +37,7 @@ export function PipelinePanel() {
   const ready = asrReady && mtLoaded.includes(mtId) && ttsLoaded;
   const voiceOptions = [
     ...profiles.map(p => ({ v: p.id, l: `${p.role === 'owner' ? '👤' : '🤝'} ${p.name}` })),
-    { v: 'default:', l: '(ZONOS 기본 음성 — TTS 탭에서 선택한 첫 음성)' },
+    { v: 'auto', l: '자동: 언어별 기본 음성' },
   ];
 
   const keepAwake = async () => {
@@ -49,11 +49,7 @@ export function PipelinePanel() {
     setErr(null); setSide(s); void keepAwake();
     const src = s === 'A' ? langA : langB, tgt = s === 'A' ? langB : langA;
     const vsel = s === 'A' ? voiceAB : voiceBA;
-    let ref = voiceRefOf(vsel, profiles);
-    if (!ref || vsel === 'default:') {
-      const d = (await listVoices())[0];
-      ref = { kind: 'default', id: d.id };
-    }
+    const ref = voiceRefOf(vsel, profiles) ?? { kind: 'auto' as const };
     const seq = currentSeq();
     const t: Turn['t'] = { endDetect: null, prep: 0, asr: 0, mt: 0, ttfa: 0, firstPlay: null, toFirstAudio: null, toPlaybackEnd: null };
     const row: Turn = { id: nextId.current++, side: s, src, tgt, source: '', translation: '', voice: ref.kind, t, net: 0, status: '' };

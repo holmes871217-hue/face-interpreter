@@ -17,6 +17,7 @@ export function useVoiceProfiles() {
 }
 
 export function voiceRefOf(sel: string, profiles: VoiceProfile[]): VoiceRef | null {
+  if (sel === 'auto' || sel === '') return { kind: 'auto' };
   if (sel.startsWith('default:')) return { kind: 'default', id: sel.slice(8) };
   const p = profiles.find(x => x.id === sel);
   return p ? { kind: 'embedding', embedding: p.embedding } : null;
@@ -30,7 +31,9 @@ export function TtsPanel() {
   const [err, setErr] = useState<string | null>(null);
   const [defaults, setDefaults] = useState<DefaultVoice[]>([]);
   const { list: profiles, refresh } = useVoiceProfiles();
-  const [voiceSel, setVoiceSel] = useState('');
+  const [voiceSel, setVoiceSel] = useState('auto');
+  const [laci, setLaci] = useState(true);
+  const [prebuf, setPrebuf] = useState(0.4);
   const [lang, setLang] = useState<Lang>('ja');
   const [text, setText] = useState(SENTENCES[0].ja);
   const [results, setResults] = useState<(TtsResult & { lang: Lang; voice: string; text: string; net: number })[]>([]);
@@ -52,7 +55,6 @@ export function TtsPanel() {
       const r = await loadTts(setProg, setEncProg);
       const v = await listVoices();
       setDefaults(v);
-      if (!voiceSel && v.length) setVoiceSel('default:' + v[0].id);
       setState({ ttsLoaded: true });
       setInfo(`ZONOS3-Mini 엔진 준비 완료 · ${fmtMs(r.ms)} (다운로드 포함 여부는 네트워크 탭 참조) · 기본 음성 ${v.length}개`);
       await record('load', { component: 'tts', model: 'ZONOS3-Mini web', ms: r.ms, defaultVoices: v.length });
@@ -66,11 +68,11 @@ export function TtsPanel() {
     setBusy(true); setErr(null);
     const seq = currentSeq();
     try {
-      const r = await synthesize(t, l, ref, { play: true });
+      const r = await synthesize(t, l, ref, { play: true, laci, prebufferSec: prebuf });
       await new Promise(res => setTimeout(res, 300));
       const net = entriesSince(seq).filter(e => !e.sameOrigin).length;
       setResults(x => [{ ...r, lang: l, voice: voiceSel, text: t, net }, ...x]);
-      await record('tts', { ...r, lang: l, voice: ref.kind, chars: t.length, crossOriginDuring: net });
+      await record('tts', { ...r, lang: l, voice: ref.kind === 'default' ? ref.id : ref.kind, chars: t.length, prebufferSec: prebuf, crossOriginDuring: net });
     } catch (e) { setErr(String(e) + (ttsFatal() ? `\n엔진: ${ttsFatal()}` : '')); }
     setBusy(false);
   };
@@ -128,6 +130,7 @@ export function TtsPanel() {
 
       <Section title="출력 목소리">
         <select value={voiceSel} onChange={e => setVoiceSel(e.target.value)} disabled={!ttsLoaded}>
+          <option value="auto">자동: 언어별 기본 음성 (일본어는 한국어 여성 음성)</option>
           <optgroup label="등록한 프로필(기기 내부)">
             {profiles.map(p => <option key={p.id} value={p.id}>{p.role === 'owner' ? '👤 ' : '🤝 '}{p.name}</option>)}
           </optgroup>
@@ -146,15 +149,22 @@ export function TtsPanel() {
           <button disabled={!ttsLoaded || busy} onClick={() => speak(text, lang)}>{busy ? '합성 중…' : '▶ 합성·재생'}</button>
           <button disabled={!ttsLoaded || busy} onClick={async () => { for (const l of LANGS) await speak(SENTENCES[4][l], l); }}>4개 언어 연속 테스트</button>
         </div>
+        <div className="row">
+          <label className="radio"><input type="checkbox" checked={laci} onChange={e => setLaci(e.target.checked)} />LACI(말 늘어짐·잘림 방지)</label>
+          재생 버퍼 <select value={prebuf} onChange={e => setPrebuf(Number(e.target.value))}>{[0, 0.2, 0.4, 0.8, 1.5].map(v => <option key={v} value={v}>{v} 초</option>)}</select>
+        </div>
         <p className="note">브라우저 엔진에서는 텍스트 정규화(숫자→읽는 말)가 꺼져 있습니다(공식 README). 숫자는 글자로 풀어 쓰는 전처리가 필요할 수 있습니다.</p>
         <table className="grid">
-          <thead><tr><th>언어</th><th>문장</th><th>첫 음성(TTFA)</th><th>스피커 출력 시작</th><th>합성 완료</th><th>음성 길이</th><th>RTF</th><th>외부요청</th></tr></thead>
+          <thead><tr><th>언어</th><th>문장</th><th>첫 음성(TTFA)</th><th>스피커 출력 시작</th><th>합성 완료</th><th>음성 길이</th><th>RTF</th><th>끊김</th><th>LACI</th><th>외부요청</th></tr></thead>
           <tbody>{results.map((r, i) => (
             <tr key={i}><td>{r.lang}</td><td>{r.text}</td><td>{fmtMs(r.ttfaMs)}</td><td>{fmtMs(r.firstPlayMs)}</td><td>{fmtMs(r.totalMs)}</td>
-              <td>{r.audioSec.toFixed(1)} s</td><td className={r.rtf < 1 ? 'ok' : 'bad'}>{r.rtf.toFixed(2)}</td><td className={r.net ? 'bad' : 'ok'}>{r.net}</td></tr>
+              <td>{r.audioSec.toFixed(1)} s</td><td className={r.rtf < 1 ? 'ok' : 'bad'}>{r.rtf.toFixed(2)}</td>
+              <td className={r.underruns ? 'bad' : 'ok'}>{r.underruns}회{r.gapSec > 0.05 ? ` (${r.gapSec.toFixed(1)} s)` : ''}</td>
+              <td>{r.laci ? 'O' : 'X'}{r.capped ? <div className="bad">길이 제한 도달</div> : null}</td>
+              <td className={r.net ? 'bad' : 'ok'}>{r.net}</td></tr>
           ))}</tbody>
         </table>
-        <p className="note">RTF &lt; 1 이면 실시간보다 빠름. 첫 합성은 셰이더 컴파일 때문에 느릴 수 있으니 2회 이상 측정하세요.</p>
+        <p className="note">끊김 = 재생 도중 음성이 바닥나 멈춘 횟수(소리가 툭툭 끊기는 원인). RTF &lt; 1 이면 실시간보다 빠름. 첫 합성은 셰이더 컴파일 때문에 느릴 수 있으니 2회 이상 측정하세요.</p>
       </Section>
 
       <Section title="음성 프로필 등록" note="원본 녹음은 프로필 생성 직후 버립니다. 기기에는 192차원 화자 임베딩만 IndexedDB에 저장됩니다.">

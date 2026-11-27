@@ -95,7 +95,7 @@ export async function embedVoice(wav: ArrayBuffer, label: string): Promise<{ emb
   return { embedding: e.embedding, ms: performance.now() - t0 };
 }
 
-export type VoiceRef = { kind: 'default'; id: string } | { kind: 'embedding'; embedding: number[] };
+export type VoiceRef = { kind: 'default'; id: string } | { kind: 'auto' } | { kind: 'embedding'; embedding: number[] };
 
 export interface TtsResult {
   ttfaMs: number;          // request → first PCM bytes from the engine
@@ -104,20 +104,54 @@ export interface TtsResult {
   audioSec: number;
   rtf: number;             // totalMs / audio duration
   playbackEndMs: number | null;
+  underruns: number;       // times playback ran dry mid-sentence (audible gaps)
+  gapSec: number;          // total silence inserted by those gaps
+  laci: boolean;           // alignment-guarded decoding was used
+  capped: boolean;         // hit the length cap (runaway generation)
 }
 
-export async function synthesize(text: string, lang: Lang, voice: VoiceRef, opts: { play: boolean; seed?: number; signal?: AbortSignal } = { play: true }): Promise<TtsResult> {
+/** Default voice per language (ZONOS3-Mini ships no Japanese voice; a Korean female voice is used for ja). */
+export const AUTO_VOICE: Record<Lang, string> = {
+  ko: 'default_b7a257a5b1478493', // Seoyeon ko F
+  ja: 'default_b7a257a5b1478493', // (no ja voice) Seoyeon ko F
+  en: 'default_de4d191ca7574982', // Savannah en American F
+  zh: 'default_eaee7325255d4783', // Meilin zh F
+};
+
+/** Upper bound on generated frames (15 Hz) from the text length, so a take that fails to stop cannot run for a minute. */
+export function frameCap(text: string, lang: Lang): number {
+  const charsPerSec = lang === 'en' ? 9 : 3.5;   // deliberately slow speaking rates: the cap must not cut real speech
+  return Math.ceil(15 * (2 + text.length / charsPerSec));
+}
+
+export interface SynthOptions { play: boolean; seed?: number; signal?: AbortSignal; laci?: boolean; prebufferSec?: number }
+
+export async function synthesize(text: string, lang: Lang, voice: VoiceRef, opts: SynthOptions = { play: true }): Promise<TtsResult> {
+  const cap = frameCap(text, lang);
   const body: Record<string, unknown> = {
     text, language: CODES.zonos[lang], stream: true, format: 'pcm', seed: opts.seed ?? 1234,
     speaker_mode: 'embedding',   // embedding mode needs only the 43 MB speaker encoder, not the 2.6 GB reference encoder
+    max_tokens: cap,
   };
+  // LACI: the engine tracks the reading position and rolls back skipped text, hallucinated audio and early stops.
+  let laci = opts.laci ?? true;
+  if (laci) body.laci = true;
   if (voice.kind === 'default') body.speaker_embedding_id = voice.id;
+  else if (voice.kind === 'auto') body.speaker_embedding_id = AUTO_VOICE[lang];
   else { body.speaker_embedding_base64 = npyBase64(voice.embedding); body.speaker_embedding_name = 'profile.npy'; }
 
   const ctx = opts.play ? await audioContext() : null;
-  const player = ctx ? new StreamPlayer(ctx, SAMPLE_RATE) : null;
+  const player = ctx ? new StreamPlayer(ctx, SAMPLE_RATE, opts.prebufferSec ?? 0.4) : null;
   const t0 = performance.now();
-  const r = await api('/v2/generate', { method: 'POST', body: JSON.stringify(body), signal: opts.signal });
+  let r = await api('/v2/generate', { method: 'POST', body: JSON.stringify(body), signal: opts.signal });
+  if (r.status === 400 && laci) {
+    // Engine without LACI heads for this language: fall back to plain decoding and say so in the result.
+    const msg = await r.text();
+    if (!/laci/i.test(msg)) throw new Error(`/v2/generate 400: ${msg.slice(0, 300)}`);
+    laci = false;
+    delete body.laci;
+    r = await api('/v2/generate', { method: 'POST', body: JSON.stringify(body), signal: opts.signal });
+  }
   if (!r.ok || !r.body) throw new Error(`/v2/generate ${r.status}: ${(await r.text()).slice(0, 300)}`);
   const reader = r.body.getReader();
   let ttfa = -1;
@@ -136,6 +170,7 @@ export async function synthesize(text: string, lang: Lang, voice: VoiceRef, opts
     samples += f.length;
     player?.push(f);
   }
+  player?.end();
   const totalMs = performance.now() - t0;
   const audioSec = samples / SAMPLE_RATE;
   let playbackEndMs: number | null = null;
@@ -143,5 +178,6 @@ export async function synthesize(text: string, lang: Lang, voice: VoiceRef, opts
   return {
     ttfaMs: ttfa, firstPlayMs: player?.firstPlayAt ? player.firstPlayAt - t0 : null,
     totalMs, audioSec, rtf: audioSec > 0 ? totalMs / 1000 / audioSec : NaN, playbackEndMs,
+    underruns: player?.underruns ?? 0, gapSec: player?.gapSec ?? 0, laci, capped: audioSec * 15 >= cap - 2,
   };
 }

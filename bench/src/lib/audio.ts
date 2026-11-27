@@ -163,26 +163,60 @@ export function rmsOf(pcm: Float32Array): number {
   return Math.sqrt(s / Math.max(1, pcm.length));
 }
 
-/** Gapless player for streamed float32 PCM chunks. */
+/** Streamed float32 PCM player with a jitter buffer.
+ *  Playback starts once `prebufferSec` of audio is queued (or the stream ends). If the queue runs dry mid-sentence
+ *  (generation slower than playback for a moment) that is counted as an underrun and the player re-buffers
+ *  instead of playing tiny fragments back to back, which is what sounds "choppy". */
 export class StreamPlayer {
   private next = 0;
   private sources: AudioBufferSourceNode[] = [];
+  private pending: Float32Array[] = [];
+  private pendingSec = 0;
+  private started = false;
   private lastEnd: Promise<void> = Promise.resolve();
   firstPlayAt: number | null = null;
+  underruns = 0;
+  gapSec = 0;
 
-  constructor(private ctx: AudioContext, private sampleRate: number) {}
+  constructor(private ctx: AudioContext, private sampleRate: number, private prebufferSec = 0.4) {}
 
   push(chunk: Float32Array) {
     if (!chunk.length) return;
-    const buf = this.ctx.createBuffer(1, chunk.length, this.sampleRate);
-    buf.copyToChannel(new Float32Array(chunk), 0);
+    this.pending.push(new Float32Array(chunk));
+    this.pendingSec += chunk.length / this.sampleRate;
+    const queuedAhead = this.next - this.ctx.currentTime;
+    if (this.started && queuedAhead <= 0.02) {
+      // Ran dry: everything scheduled has already played.
+      this.underruns++;
+      this.started = false;
+    }
+    if (!this.started && this.pendingSec < this.prebufferSec) return;
+    this.flush();
+  }
+
+  /** Call when the stream is complete: plays whatever is still buffered. */
+  end() { this.flush(); }
+
+  private flush() {
+    if (!this.pending.length) return;
+    const n = this.pending.reduce((a, c) => a + c.length, 0);
+    const pcm = new Float32Array(n);
+    let o = 0;
+    for (const c of this.pending) { pcm.set(c, o); o += c.length; }
+    this.pending = [];
+    this.pendingSec = 0;
+    const buf = this.ctx.createBuffer(1, pcm.length, this.sampleRate);
+    buf.copyToChannel(pcm, 0);
     const src = this.ctx.createBufferSource();
     src.buffer = buf;
     src.connect(this.ctx.destination);
-    const at = Math.max(this.ctx.currentTime + 0.03, this.next);
+    const now = this.ctx.currentTime;
+    const at = Math.max(now + 0.03, this.next);
+    if (this.next > 0 && at > this.next + 0.001) this.gapSec += at - this.next;
     src.start(at);
-    if (this.firstPlayAt === null) this.firstPlayAt = performance.now() + (at - this.ctx.currentTime) * 1000;
+    if (this.firstPlayAt === null) this.firstPlayAt = performance.now() + (at - now) * 1000;
     this.next = at + buf.duration;
+    this.started = true;
     this.sources.push(src);
     this.lastEnd = new Promise(r => { src.onended = () => r(); });
   }
@@ -190,12 +224,13 @@ export class StreamPlayer {
   /** Resolves when everything pushed so far has played. */
   ended(): Promise<void> { return this.lastEnd; }
 
-  stop() { for (const s of this.sources) { try { s.stop(); } catch { /* not started */ } } this.sources = []; }
+  stop() { for (const s of this.sources) { try { s.stop(); } catch { /* not started */ } } this.sources = []; this.pending = []; }
 }
 
 export async function playPcm(pcm: Float32Array, sampleRate: number): Promise<void> {
   const ctx = await audioContext();
-  const p = new StreamPlayer(ctx, sampleRate);
+  const p = new StreamPlayer(ctx, sampleRate, 0);
   p.push(pcm);
+  p.end();
   await p.ended();
 }

@@ -67,6 +67,17 @@ export function netSummary(list: NetEntry[] = entries) {
   };
 }
 
-/** Marker: entries after this seq belong to an inference window (used to prove "0 requests during inference"). */
-export function currentSeq(): number { return entries.length ? entries[entries.length - 1].seq : 0; }
-export function entriesSince(seq: number): NetEntry[] { return entries.filter(e => e.seq > seq); }
+/** Marker for an inference window (used to prove "0 requests during inference").
+ *  Time-based: the service worker's own sequence counter restarts whenever the browser stops an idle worker,
+ *  so sequence numbers are not comparable across that restart. */
+export function currentSeq(): number { return Date.now(); }
+export function entriesSince(since: number): NetEntry[] {
+  const seen = new Set<string>();
+  return entries.filter(e => {
+    if (e.t < since) return false;
+    const k = `${e.seq}:${e.t}:${e.url}`;   // de-duplicate entries re-sent after a getLog
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
