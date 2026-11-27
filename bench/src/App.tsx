@@ -16,7 +16,23 @@ const TABS = [
 ] as const;
 type Tab = typeof TABS[number][0];
 
+declare const __BUILD__: string;
+
+/** Shows a banner when the deployed build differs from the running one (GitHub Pages caches the page for 10 min). */
+function useUpdateCheck() {
+  const [latest, setLatest] = useState<string | null>(null);
+  useEffect(() => {
+    const check = () => fetch(new URL('./version.json', document.baseURI).href, { cache: 'no-store' })
+      .then(r => r.ok ? r.json() : null).then(j => { if (j?.build && j.build !== __BUILD__) setLatest(j.build); }).catch(() => {});
+    void check();
+    const id = setInterval(check, 60000);
+    return () => clearInterval(id);
+  }, []);
+  return latest;
+}
+
 export function App() {
+  const latest = useUpdateCheck();
   const [tab, setTab] = useState<Tab>(() => {
     try { return (localStorage.getItem('tab') as Tab) || 'device'; } catch { return 'device'; }
   });
@@ -41,6 +57,12 @@ export function App() {
           <span className={ready.asr ? 'on' : ''}>ASR</span><span className={ready.mt ? 'on' : ''}>MT</span><span className={ready.tts ? 'on' : ''}>TTS</span>
         </div>
       </header>
+      {latest && (
+        <button className="update" onClick={async () => {
+          try { await (await navigator.serviceWorker.getRegistration())?.update(); } catch { /* ignore */ }
+          location.replace(new URL(`./?v=${latest}`, document.baseURI).href);
+        }}>새 버전({latest})이 있습니다 · 눌러서 업데이트</button>
+      )}
       <ReportBar />
       <nav>{TABS.map(([k, l]) => <button key={k} className={tab === k ? 'active' : ''} onClick={() => setTab(k)}>{l}</button>)}</nav>
       <main>

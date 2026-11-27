@@ -70,3 +70,4 @@ footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 1
 .reportbar .copy { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
 .reportbar textarea { width: 100%; font-size: 12px; }
 .hero { border: 2px solid var(--accent); }
+.update { width: 100%; background: var(--warn); color: #fff; border-color: var(--warn); font-weight: 700; margin: 4px 0; }

@@ -2,3 +2,4 @@ node_modules/
 dist/
 public/ort/
 public/zonos3-engine/
+public/version.json
