@@ -7,7 +7,7 @@ import { ZONOS_SIZES_MB } from '../lib/models';
 import { currentSeq, entriesSince } from '../lib/net';
 import { AUTO_VOICE, VOICE_NAME, embedVoice, synthesizeVerified, listVoices, loadTts, synthesize, ttsFatal, type DefaultVoice, type EngineProgress, type TtsResult, type VoiceRef } from '../lib/tts';
 import { fmtMs, record, setState, useStore } from '../store';
-import { logError, logNote, logTts } from '../lib/report';
+import { clearGpuRetry, gpuRetryCount, logError, logNote, logTts, scheduleGpuRetry } from '../lib/report';
 import { audioContext } from '../lib/audio';
 import { Badge, ErrorBox, KV, Progress, Section } from '../ui';
 
@@ -65,11 +65,19 @@ export function TtsPanel() {
       setErr(String(e) + (ttsFatal() ? `\n엔진: ${ttsFatal()}` : ''));
       logError('엔진 로드', ttsFatal() ? `${String(e)} / 엔진: ${ttsFatal()}` : e);
       setProg(null);
+      if (/device lost|DeviceLost/i.test(String(e) + (ttsFatal() ?? '')) && scheduleGpuRetry()) {
+        setInfo('그래픽 칩 오류가 나서 페이지를 자동으로 다시 엽니다…');
+      }
       return false;
     }
     setProg(null);
+    clearGpuRetry();
     return true;
   };
+
+  // After an automatic restart, prepare the engine again without waiting for a tap (playing still needs one).
+  const [retryBanner] = useState(() => gpuRetryCount());
+  useEffect(() => { if (retryBanner > 0 && !ttsLoaded) void load(); }, []);   // eslint-disable-line react-hooks/exhaustive-deps
 
   /** One tap: unlock audio, load the engine if needed, then read the same sentence in all four languages (stable mode). */
   const oneTap = async () => {
@@ -108,6 +116,7 @@ export function TtsPanel() {
     } catch (e) {
       setErr(String(e) + (ttsFatal() ? `\n엔진: ${ttsFatal()}` : ''));
       logError(`합성 ${l}`, ttsFatal() ? `${String(e)} / 엔진: ${ttsFatal()}` : e);
+      if (/device lost|DeviceLost/i.test(String(e) + (ttsFatal() ?? ''))) scheduleGpuRetry();
     }
   };
 
@@ -175,6 +184,7 @@ export function TtsPanel() {
     <>
       <section className="card hero">
         <h2>원클릭 테스트</h2>
+        {retryBanner > 0 && <p className="error">그래픽 칩 오류로 페이지를 자동 재시작했습니다({retryBanner}번째). 엔진 준비가 끝나면 원클릭 테스트를 다시 눌러 주세요.</p>}
         <p className="note">한 번 누르면 엔진을 준비하고(처음 한 번만 몇 분) 같은 문장을 한국어·일본어·영어·중국어로 차례로 들려줍니다. 끝나면 맨 위 <b>📋 결과 복사</b>를 눌러 Claude 대화창에 붙여넣기 하세요.</p>
         <button className="big" disabled={busy || !!prog} onClick={oneTap}>{busy || prog ? '진행 중… 화면을 켜 두세요' : '▶ 원클릭 테스트'}</button>
         {prog && <Progress loaded={prog.loaded} total={prog.total} label={prog.models.join('+')} />}

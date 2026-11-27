@@ -7,11 +7,35 @@ export interface TtsLine {
   attempts?: number; rejected?: string[]; readyMs?: number; ttfaMs: number; rtf: number; laci: boolean;
 }
 
-const errors: ErrorEntry[] = [];
-const tts: TtsLine[] = [];
-const notes: string[] = [];
+// Kept in sessionStorage so the report survives an automatic reload after a GPU crash (same tab only).
+const KEY = 'bench-report-v1';
+function restore(): { errors: ErrorEntry[]; tts: TtsLine[]; notes: string[] } {
+  try { const j = JSON.parse(sessionStorage.getItem(KEY) ?? ''); if (j && Array.isArray(j.errors)) return j; } catch { /* none */ }
+  return { errors: [], tts: [], notes: [] };
+}
+const saved = restore();
+const errors: ErrorEntry[] = saved.errors;
+const tts: TtsLine[] = saved.tts;
+const notes: string[] = saved.notes;
 const listeners = new Set<() => void>();
-const emit = () => listeners.forEach(f => f());
+const emit = () => {
+  try { sessionStorage.setItem(KEY, JSON.stringify({ errors, tts, notes })); } catch { /* private mode */ }
+  listeners.forEach(f => f());
+};
+export function clearReport() { errors.length = 0; tts.length = 0; notes.length = 0; emit(); }
+
+/** GPU crash recovery: reload the page (a lost GPU device cannot be reused) and load the engine again, at most twice. */
+const RETRY_KEY = 'bench-gpu-retry';
+export function gpuRetryCount(): number { try { return Number(sessionStorage.getItem(RETRY_KEY) ?? 0); } catch { return 0; } }
+export function scheduleGpuRetry(): boolean {
+  const n = gpuRetryCount();
+  if (n >= 2) return false;
+  try { sessionStorage.setItem(RETRY_KEY, String(n + 1)); localStorage.setItem('tab', 'tts'); } catch { return false; }
+  logNote(`그래픽 칩 오류 → 페이지 자동 재시작 (${n + 1}번째)`);
+  setTimeout(() => location.reload(), 300);
+  return true;
+}
+export function clearGpuRetry() { try { sessionStorage.removeItem(RETRY_KEY); } catch { /* ignore */ } }
 
 export function onReport(f: () => void): () => void { listeners.add(f); return () => listeners.delete(f); }
 
