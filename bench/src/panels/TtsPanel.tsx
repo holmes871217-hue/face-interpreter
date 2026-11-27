@@ -5,7 +5,7 @@ import { encodeWav, MicCapture } from '../lib/audio';
 import { voices as voiceDb, type VoiceProfile } from '../lib/db';
 import { ZONOS_SIZES_MB } from '../lib/models';
 import { currentSeq, entriesSince } from '../lib/net';
-import { AUTO_VOICE, VOICE_NAME, embedVoice, engineMode, synthesizeVerified, listVoices, loadTts, synthesize, ttsFatal, type DefaultVoice, type EngineProgress, type TtsResult, type VoiceRef } from '../lib/tts';
+import { AUTO_VOICE, ENGINE_MODES, VOICE_NAME, embedVoice, engineMode, setEngineMode, type EngineMode, synthesizeVerified, listVoices, loadTts, synthesize, ttsFatal, type DefaultVoice, type EngineProgress, type TtsResult, type VoiceRef } from '../lib/tts';
 import { fmtMs, record, setState, useStore } from '../store';
 import { clearGpuRetry, gpuRetryCount, logError, logNote, logTts, scheduleGpuRetry } from '../lib/report';
 import { audioContext } from '../lib/audio';
@@ -55,12 +55,13 @@ export function TtsPanel() {
   const lastProg = useRef<EngineProgress | null>(null);
   const [stage, setStage] = useState('');
   const lastStage = useRef('');
+  const codecUsed = useRef('');
   const load = async () => {
     setErr(null); setProg({ models: [], loaded: 0, total: 0, fetched: 0 });
     const t0 = performance.now();
     try {
       const r = await loadTts(p => { lastProg.current = p; setProg(p); }, setEncProg,
-        st => { lastStage.current = st; setStage(st); });
+        st => { lastStage.current = st; if (st.startsWith('codec 사용')) codecUsed.current = st.slice(9); setStage(st); });
       const v = await listVoices();
       setDefaults(v);
       setState({ ttsLoaded: true });
@@ -72,14 +73,15 @@ export function TtsPanel() {
       logNote(`엔진 로드 실패 시점: ${((performance.now() - t0) / 1000).toFixed(0)}초, 시작 방식 ${engineMode()}, 마지막 단계 '${lastStage.current || '없음'}', 마지막 진행 ${lp ? `${lp.models.join('+')} ${Math.round(lp.loaded / 1048576)}/${Math.round(lp.total / 1048576)}MB (네트워크 ${Math.round(lp.fetched / 1048576)}MB)` : '없음'}`);
       logError('엔진 로드', ttsFatal() ? `${String(e)} / 엔진: ${ttsFatal()}` : e);
       setProg(null);
-      if (/device lost|DeviceLost/i.test(String(e) + (ttsFatal() ?? '')) && scheduleGpuRetry()) {
+      const next = engineMode() === 'tuned' && /codec 커널 시험/.test(lastStage.current) ? 'fixed' : undefined;
+      if (/device lost|DeviceLost/i.test(String(e) + (ttsFatal() ?? '')) && scheduleGpuRetry(next)) {
         setInfo('그래픽 칩 오류가 나서 페이지를 자동으로 다시 엽니다…');
       }
       return false;
     }
     setProg(null);
     clearGpuRetry();
-    logNote(`엔진 로드 성공 ${((performance.now() - t0) / 1000).toFixed(0)}초 (시작 방식 ${engineMode()})`);
+    logNote(`엔진 로드 성공 ${((performance.now() - t0) / 1000).toFixed(0)}초 (시작 방식 ${engineMode()}, 코덱 ${codecUsed.current || '?'})`);
     return true;
   };
 
@@ -197,6 +199,13 @@ export function TtsPanel() {
         <button className="big" disabled={busy || !!prog} onClick={oneTap}>{busy || prog ? '진행 중… 화면을 켜 두세요' : '▶ 원클릭 테스트'}</button>
         {prog && <Progress loaded={prog.loaded} total={prog.total} label={prog.models.join('+')} />}
         {prog && stage && <p className="note">엔진 단계: {stage}</p>}
+        <div className="row">
+          시작 방식 <select value={engineMode()} disabled={busy || !!prog} onChange={e => {
+            setEngineMode(e.target.value as EngineMode);
+            location.replace(location.pathname + location.hash);   // the engine starts once per page: reload to apply
+          }}>{(Object.keys(ENGINE_MODES) as EngineMode[]).map(m => <option key={m} value={m}>{ENGINE_MODES[m].label}</option>)}</select>
+        </div>
+        <p className="note">바꾸면 페이지가 새로 열립니다. 소리가 깨지거나 엔진이 멈추면 다른 방식으로 바꿔 보세요.</p>
       </section>
 
       <Section title="ZONOS3-Mini (WebGPU, 기기 내 실행)"

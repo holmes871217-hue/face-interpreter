@@ -27,11 +27,14 @@ export function clearReport() { errors.length = 0; tts.length = 0; notes.length 
 /** GPU crash recovery: reload the page (a lost GPU device cannot be reused) and load the engine again, at most twice. */
 const RETRY_KEY = 'bench-gpu-retry';
 export function gpuRetryCount(): number { try { return Number(sessionStorage.getItem(RETRY_KEY) ?? 0); } catch { return 0; } }
-export function scheduleGpuRetry(): boolean {
+export function scheduleGpuRetry(nextMode?: string): boolean {
   const n = gpuRetryCount();
   if (n >= 2) return false;
-  try { sessionStorage.setItem(RETRY_KEY, String(n + 1)); localStorage.setItem('tab', 'tts'); } catch { return false; }
-  logNote(`그래픽 칩 오류 → 페이지 자동 재시작 (${n + 1}번째)`);
+  try {
+    sessionStorage.setItem(RETRY_KEY, String(n + 1)); localStorage.setItem('tab', 'tts');
+    if (nextMode) localStorage.setItem('engineMode', nextMode);
+  } catch { return false; }
+  logNote(`그래픽 칩 오류 → 페이지 자동 재시작 (${n + 1}번째)${nextMode ? `, 시작 방식 '${nextMode}'로 변경` : ''}`);
   setTimeout(() => location.reload(), 300);
   return true;
 }

@@ -22,11 +22,24 @@ let fatal: string | null = null;
 
 export type EngineProgress = { models: string[]; loaded: number; total: number; fetched: number };
 
-/** Start-up mode: 'light' (default) skips the codec kernel timing and the reference-mode warm-up, which is where the
- *  Galaxy S22 Ultra lost its GPU device; '?engine=full' in the page URL restores the engine's defaults. */
-export function engineMode(): 'light' | 'full' {
-  return new URLSearchParams(location.search).get('engine') === 'full' ? 'full' : 'light';
+/** Engine start-up modes (query flags understood by the patched engine). Chosen in the TTS tab, kept per device.
+ *  Galaxy S22 Ultra history: 'full' lost the GPU device after loading weights; 'q8' started but its audio was
+ *  reported as broken. */
+export const ENGINE_MODES = {
+  tuned: { label: '기본 코덱(속도 시험 O) + 최소 예열', query: '?warm=min' },
+  fixed: { label: '기본 코덱(시험 없이 고정) + 최소 예열', query: '?zacplan=gemm_h8_ks4,gemm_h8_r8_8x8&warm=min' },
+  q8: { label: 'q8 코덱 + 최소 예열 (갤럭시에서 소리 깨짐 보고)', query: '?zacq8=1&warm=min' },
+  full: { label: '엔진 원래 방식(전체 예열)', query: '' },
+} as const;
+export type EngineMode = keyof typeof ENGINE_MODES;
+
+export function engineMode(): EngineMode {
+  const q = new URLSearchParams(location.search).get('engine');
+  if (q && q in ENGINE_MODES) return q as EngineMode;
+  try { const v = localStorage.getItem('engineMode'); if (v && v in ENGINE_MODES) return v as EngineMode; } catch { /* ignore */ }
+  return 'tuned';
 }
+export function setEngineMode(m: EngineMode) { try { localStorage.setItem('engineMode', m); } catch { /* ignore */ } }
 
 export function loadTts(onProgress: (p: EngineProgress) => void, onEncoder?: (p: EngineProgress) => void,
   onStage?: (s: string) => void): Promise<{ ms: number }> {
@@ -37,7 +50,7 @@ export function loadTts(onProgress: (p: EngineProgress) => void, onEncoder?: (p:
     mod.engine.onFatal(m => { fatal = m; });
     if (onEncoder) mod.engine.onEncoderProgress(onEncoder);
     if (onStage) mod.engine.onStage?.(onStage);
-    const base = engineMode() === 'light' ? ZONOS_BASE + '?zacq8=1&warm=min' : ZONOS_BASE;
+    const base = ZONOS_BASE + ENGINE_MODES[engineMode()].query;
     await mod.engine.init(onProgress, { base, cache: true });
     return { ms: performance.now() - t0 };
   })().catch(e => { ready = null; throw e; });

@@ -30,7 +30,7 @@ index 7c73061..2ae8fdd 100644
  
  /** The route's audio field of a JSON body decoded to 44.1 kHz mono (at most the route's maxSeconds) and the upload's
 diff --git a/servers/web/src/worker.ts b/servers/web/src/worker.ts
-index 8043899..d02580d 100644
+index 8043899..577ed4c 100644
 --- a/servers/web/src/worker.ts
 +++ b/servers/web/src/worker.ts
 @@ -34,6 +34,7 @@ export type OutMsg =
@@ -41,7 +41,7 @@ index 8043899..d02580d 100644
    | { type: 'res'; id: number; status: number; headers: Record<string, string> }
    | { type: 'chunk'; id: number; data: ArrayBuffer }
    | { type: 'end'; id: number };
-@@ -148,8 +149,17 @@ async function decoderList(gpu: Gpu, base: string, cache: boolean, zac: ZacStrea
+@@ -148,8 +149,21 @@ async function decoderList(gpu: Gpu, base: string, cache: boolean, zac: ZacStrea
  }
  
  async function init(base: string, cache: boolean, voicesPcm: Record<string, Float32Array>, codecPort: MessagePort): Promise<void> {
@@ -50,6 +50,10 @@ index 8043899..d02580d 100644
 +  // warm=min|off shrinks or skips the warm-up. Each step is reported as a 'stage' message.
 +  const flags = new URL(base).searchParams;
 +  const zacQ8 = flags.get('zacq8') === '1';
++  // zacplan=<skinny kernel>,<large kernel>: use these codec kernels without timing the candidates.
++  const zacPlanArg = flags.get('zacplan')?.split(',');
++  const zacPlan = zacQ8 ? { skinny: 'q8', large: 'q8' }
++    : zacPlanArg?.length === 2 ? { skinny: zacPlanArg[0], large: zacPlanArg[1] } : undefined;
 +  const warmMode = (flags.get('warm') ?? 'full') as 'full' | 'min' | 'off';
 +  const stage = (s: string) => post({ type: 'stage', stage: s });
 +  stage('gpu');
@@ -59,7 +63,7 @@ index 8043899..d02580d 100644
    const progress = (p: LoadProgress) => post({ type: 'progress', ...p });
    const voicesBase = new URL('voices/', base).href;
    const voicesRaw = await fetchJson<{ id: string; label: string; file: string; codes: string; embedding: string }[]>(
-@@ -162,6 +172,7 @@ async function init(base: string, cache: boolean, voicesPcm: Record<string, Floa
+@@ -162,6 +176,7 @@ async function init(base: string, cache: boolean, voicesPcm: Record<string, Floa
    };
    const voiceFiles = Promise.all(voicesRaw.map(v => Promise.all([fetchBytes(v.codes), fetchBytes(v.embedding)])));
    // backbone + zac as one readout (one bar, one ETA), in the order they load.
@@ -67,7 +71,7 @@ index 8043899..d02580d 100644
    const boot = await batchProgress(base, ['backbone', 'zac'], progress);
    const bbw = await loadModel(gpu, base, 'backbone', boot, cache);
    const zacw = await loadModel(gpu, base, 'zac', boot, cache);
-@@ -174,6 +185,7 @@ async function init(base: string, cache: boolean, voicesPcm: Record<string, Floa
+@@ -174,6 +189,7 @@ async function init(base: string, cache: boolean, voicesPcm: Record<string, Floa
      };
    });
  
@@ -75,14 +79,14 @@ index 8043899..d02580d 100644
    const steerBuf = await companion(base, 'steer.gguf');
    const steer: SteerBundle | null = steerBuf
      ? loadSteer(parseGguf(steerBuf), { nEmbd: hp.nEmbd, nLayer: hp.nLayer, speakerDim: hp.speakerDim }) : null;
-@@ -181,11 +193,17 @@ async function init(base: string, cache: boolean, voicesPcm: Record<string, Floa
+@@ -181,11 +197,17 @@ async function init(base: string, cache: boolean, voicesPcm: Record<string, Floa
  
    const steerSources = steer ? steer.sources : [];
    const backbone = new Backbone(gpu, bbw, steerSources);
 -  const zac = await ZacStream.create(gpu, zacw, p => new RemoteSpecSink(codecPort, p));
-+  await settle(zacQ8 ? 'codec (q8 고정)' : 'codec 커널 시험');
-+  const zac = await ZacStream.create(gpu, zacw, p => new RemoteSpecSink(codecPort, p),
-+    zacQ8 ? { skinny: 'q8', large: 'q8' } : undefined);
++  await settle(zacPlan ? `codec 고정 ${zacPlan.skinny}/${zacPlan.large}` : 'codec 커널 시험');
++  const zac = await ZacStream.create(gpu, zacw, p => new RemoteSpecSink(codecPort, p), zacPlan);
++  stage(`codec 사용 ${zac.gemmPlan.skinny}/${zac.gemmPlan.large}`);
    const tokenizer = createTokenizer();
 -  await warmup(backbone, zac, hp);
 +  await settle(`예열(${warmMode})`);
@@ -95,7 +99,7 @@ index 8043899..d02580d 100644
  
    let spk: Promise<SpeakerEncoder> | null = null;
    let ref: Promise<RefEncoder> | null = null;
-@@ -208,20 +226,26 @@ async function init(base: string, cache: boolean, voicesPcm: Record<string, Floa
+@@ -208,20 +230,26 @@ async function init(base: string, cache: boolean, voicesPcm: Record<string, Floa
  /** Runs every program the first request needs once (both slots' prefill tiles, the cached 256-row chunk program plus a
   *  remainder via a 309-row reference prompt, a sampled decode step alone and as a CFG pair, a full codec chunk) so
   *  pipeline compilation and first-use costs land before 'ready' instead of in the first request. */

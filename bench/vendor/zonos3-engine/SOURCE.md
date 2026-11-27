@@ -17,6 +17,7 @@
 - Optional flags in the models URL query (relative model paths resolve without them):
   `zacq8=1` keeps the q8 codec kernels instead of timing f16 ("h8") variants at load;
   `warm=min` warms only the short prompt and plain sampling (skips the 309-row reference prompt and CFG pair);
+  `zacplan=<skinny>,<large>` uses the named codec kernels without timing;
   `warm=off` skips the warm-up.
 - Reason: on a Galaxy S22 Ultra (Adreno 7xx, Chrome 158) start-up lost the GPU device (VK_ERROR_DEVICE_LOST)
   right after all weights were loaded, repeatedly.
