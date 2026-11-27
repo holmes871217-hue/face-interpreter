@@ -1,0 +1,201 @@
+import { useEffect, useRef, useState } from 'react';
+import { LANG_LABEL, LANGS, type Lang } from '../data/languages';
+import { ENROLL_SCRIPT, SENTENCES } from '../data/sentences';
+import { encodeWav, MicCapture } from '../lib/audio';
+import { voices as voiceDb, type VoiceProfile } from '../lib/db';
+import { ZONOS_SIZES_MB } from '../lib/models';
+import { currentSeq, entriesSince } from '../lib/net';
+import { embedVoice, listVoices, loadTts, synthesize, ttsFatal, type DefaultVoice, type EngineProgress, type TtsResult, type VoiceRef } from '../lib/tts';
+import { fmtMs, record, setState, useStore } from '../store';
+import { Badge, ErrorBox, KV, Progress, Section } from '../ui';
+
+export function useVoiceProfiles() {
+  const [list, setList] = useState<VoiceProfile[]>([]);
+  const refresh = async () => setList(await voiceDb.all());
+  useEffect(() => { void refresh(); }, []);
+  return { list, refresh };
+}
+
+export function voiceRefOf(sel: string, profiles: VoiceProfile[]): VoiceRef | null {
+  if (sel.startsWith('default:')) return { kind: 'default', id: sel.slice(8) };
+  const p = profiles.find(x => x.id === sel);
+  return p ? { kind: 'embedding', embedding: p.embedding } : null;
+}
+
+export function TtsPanel() {
+  const { ttsLoaded, device } = useStore(s => s);
+  const [prog, setProg] = useState<EngineProgress | null>(null);
+  const [encProg, setEncProg] = useState<EngineProgress | null>(null);
+  const [info, setInfo] = useState('');
+  const [err, setErr] = useState<string | null>(null);
+  const [defaults, setDefaults] = useState<DefaultVoice[]>([]);
+  const { list: profiles, refresh } = useVoiceProfiles();
+  const [voiceSel, setVoiceSel] = useState('');
+  const [lang, setLang] = useState<Lang>('ja');
+  const [text, setText] = useState(SENTENCES[0].ja);
+  const [results, setResults] = useState<(TtsResult & { lang: Lang; voice: string; text: string; net: number })[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  // enrolment
+  const [role, setRole] = useState<'owner' | 'guest'>('owner');
+  const [name, setName] = useState('');
+  const [consent, setConsent] = useState(false);
+  const [enrollLang, setEnrollLang] = useState<Lang>('ko');
+  const [secs, setSecs] = useState(12);
+  const [recState, setRecState] = useState<'idle' | 'rec' | 'proc'>('idle');
+  const [elapsed, setElapsed] = useState(0);
+  const cap = useRef<MicCapture | null>(null);
+
+  const load = async () => {
+    setErr(null); setProg({ models: [], loaded: 0, total: 0, fetched: 0 });
+    try {
+      const r = await loadTts(setProg, setEncProg);
+      const v = await listVoices();
+      setDefaults(v);
+      if (!voiceSel && v.length) setVoiceSel('default:' + v[0].id);
+      setState({ ttsLoaded: true });
+      setInfo(`ZONOS3-Mini 엔진 준비 완료 · ${fmtMs(r.ms)} (다운로드 포함 여부는 네트워크 탭 참조) · 기본 음성 ${v.length}개`);
+      await record('load', { component: 'tts', model: 'ZONOS3-Mini web', ms: r.ms, defaultVoices: v.length });
+    } catch (e) { setErr(String(e) + (ttsFatal() ? `\n엔진: ${ttsFatal()}` : '')); }
+    setProg(null);
+  };
+
+  const speak = async (t: string, l: Lang) => {
+    const ref = voiceRefOf(voiceSel, profiles);
+    if (!ref) { setErr('출력 목소리를 선택하세요'); return; }
+    setBusy(true); setErr(null);
+    const seq = currentSeq();
+    try {
+      const r = await synthesize(t, l, ref, { play: true });
+      await new Promise(res => setTimeout(res, 300));
+      const net = entriesSince(seq).filter(e => !e.sameOrigin).length;
+      setResults(x => [{ ...r, lang: l, voice: voiceSel, text: t, net }, ...x]);
+      await record('tts', { ...r, lang: l, voice: ref.kind, chars: t.length, crossOriginDuring: net });
+    } catch (e) { setErr(String(e) + (ttsFatal() ? `\n엔진: ${ttsFatal()}` : '')); }
+    setBusy(false);
+  };
+
+  const enroll = async () => {
+    if (role === 'guest' && !consent) { setErr('상대방 음성 등록 전에 본인 동의를 확인하세요.'); return; }
+    setErr(null);
+    try {
+      cap.current = new MicCapture({ vad: false, hangoverMs: 0, maxMs: secs * 1000, onLevel: () => setElapsed(e => e) });
+      const t0 = performance.now();
+      const timer = setInterval(() => setElapsed((performance.now() - t0) / 1000), 200);
+      const done = await cap.current.start();
+      setRecState('rec');
+      const r = await done;
+      clearInterval(timer);
+      setRecState('proc');
+      const wav = encodeWav(r.pcm, r.sampleRate);
+      const seq = currentSeq();
+      const e = await embedVoice(wav, name || (role === 'owner' ? '앱 소유자' : '상대방'));
+      // The raw recording is not kept: `r.pcm` and `wav` go out of scope here. Only the 192-d embedding is stored.
+      const p: VoiceProfile = {
+        id: crypto.randomUUID(), name: name || (role === 'owner' ? '앱 소유자' : '상대방'), role,
+        consentAt: role === 'guest' ? new Date().toISOString() : null, createdAt: new Date().toISOString(),
+        sampleSeconds: r.durationMs / 1000, embedding: e.embedding, embedMs: e.ms,
+      };
+      await voiceDb.put(p);
+      await new Promise(res => setTimeout(res, 300));
+      const net = entriesSince(seq).filter(x => !x.sameOrigin);
+      await record('voice', { role, sampleSeconds: p.sampleSeconds, embedMs: e.ms, dim: e.embedding.length, crossOriginDuring: net.length, hosts: [...new Set(net.map(x => x.host))] });
+      setInfo(`음성 프로필 생성: ${p.name} · 샘플 ${p.sampleSeconds.toFixed(1)} s · 임베딩 ${e.embedding.length}차원 · ${fmtMs(e.ms)}` +
+        (net.length ? ` · 이 동안 외부 요청 ${net.length}건(최초 1회 화자 인코더 43 MB 다운로드일 수 있음: 네트워크 탭에서 확인)` : ' · 외부 요청 0건'));
+      await refresh();
+      setVoiceSel(p.id);
+      setConsent(false);
+    } catch (e) { setErr(String(e)); }
+    setRecState('idle');
+  };
+
+  if (device && !device.webgpu.available) {
+    return <Section title="음성 합성(TTS)"><p className="error">이 기기/브라우저는 WebGPU를 지원하지 않아 ZONOS3-Mini를 실행할 수 없습니다.</p></Section>;
+  }
+
+  return (
+    <>
+      <Section title="ZONOS3-Mini (WebGPU, 기기 내 실행)"
+        note={`최초 로드 시 backbone ${ZONOS_SIZES_MB.backbone} MB + 코덱 ${ZONOS_SIZES_MB.zac} MB + 기본 음성 ${ZONOS_SIZES_MB.voices} MB를 Hugging Face에서 받아 Cache Storage에 저장합니다. 음성 등록 시 화자 인코더 ${ZONOS_SIZES_MB.spk} MB가 추가됩니다(임베딩 모드). 2.6 GB 레퍼런스 인코더는 사용하지 않습니다.`}>
+        <div className="row">
+          <button onClick={load} disabled={!!prog || ttsLoaded}>{ttsLoaded ? '로드됨' : '엔진 로드'}</button>
+        </div>
+        {prog && <Progress loaded={prog.loaded} total={prog.total} label={prog.models.join('+')} />}
+        {encProg && encProg.loaded < encProg.total && <Progress loaded={encProg.loaded} total={encProg.total} label={encProg.models.join('+')} />}
+        {info && <p className="note">{info}</p>}
+        <ErrorBox error={err} />
+      </Section>
+
+      <Section title="출력 목소리">
+        <select value={voiceSel} onChange={e => setVoiceSel(e.target.value)} disabled={!ttsLoaded}>
+          <optgroup label="등록한 프로필(기기 내부)">
+            {profiles.map(p => <option key={p.id} value={p.id}>{p.role === 'owner' ? '👤 ' : '🤝 '}{p.name}</option>)}
+          </optgroup>
+          <optgroup label="ZONOS 기본 음성">
+            {defaults.map(v => <option key={v.id} value={'default:' + v.id}>{v.label}</option>)}
+          </optgroup>
+        </select>
+        <div className="row">
+          <select value={lang} onChange={e => { const l = e.target.value as Lang; setLang(l); setText(SENTENCES[0][l]); }}>
+            {LANGS.map(l => <option key={l} value={l}>{LANG_LABEL[l]}</option>)}
+          </select>
+          {SENTENCES.slice(0, 6).map((s, i) => <button key={i} className="chip" onClick={() => setText(s[lang])}>{i + 1}</button>)}
+        </div>
+        <textarea rows={2} value={text} onChange={e => setText(e.target.value)} />
+        <div className="row">
+          <button disabled={!ttsLoaded || busy} onClick={() => speak(text, lang)}>{busy ? '합성 중…' : '▶ 합성·재생'}</button>
+          <button disabled={!ttsLoaded || busy} onClick={async () => { for (const l of LANGS) await speak(SENTENCES[4][l], l); }}>4개 언어 연속 테스트</button>
+        </div>
+        <p className="note">브라우저 엔진에서는 텍스트 정규화(숫자→읽는 말)가 꺼져 있습니다(공식 README). 숫자는 글자로 풀어 쓰는 전처리가 필요할 수 있습니다.</p>
+        <table className="grid">
+          <thead><tr><th>언어</th><th>문장</th><th>첫 음성(TTFA)</th><th>스피커 출력 시작</th><th>합성 완료</th><th>음성 길이</th><th>RTF</th><th>외부요청</th></tr></thead>
+          <tbody>{results.map((r, i) => (
+            <tr key={i}><td>{r.lang}</td><td>{r.text}</td><td>{fmtMs(r.ttfaMs)}</td><td>{fmtMs(r.firstPlayMs)}</td><td>{fmtMs(r.totalMs)}</td>
+              <td>{r.audioSec.toFixed(1)} s</td><td className={r.rtf < 1 ? 'ok' : 'bad'}>{r.rtf.toFixed(2)}</td><td className={r.net ? 'bad' : 'ok'}>{r.net}</td></tr>
+          ))}</tbody>
+        </table>
+        <p className="note">RTF &lt; 1 이면 실시간보다 빠름. 첫 합성은 셰이더 컴파일 때문에 느릴 수 있으니 2회 이상 측정하세요.</p>
+      </Section>
+
+      <Section title="음성 프로필 등록" note="원본 녹음은 프로필 생성 직후 버립니다. 기기에는 192차원 화자 임베딩만 IndexedDB에 저장됩니다.">
+        <div className="row">
+          <label className="radio"><input type="radio" checked={role === 'owner'} onChange={() => setRole('owner')} />앱 소유자(기본)</label>
+          <label className="radio"><input type="radio" checked={role === 'guest'} onChange={() => setRole('guest')} />상대방(선택)</label>
+        </div>
+        <input placeholder="이름(기기에만 저장)" value={name} onChange={e => setName(e.target.value)} />
+        {role === 'guest' && (
+          <label className="consent">
+            <input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} />
+            상대방 본인이 자신의 목소리를 이 기기에서 복제·합성하는 데 동의했습니다. (임베딩은 이 기기에만 저장되며 언제든 삭제할 수 있음)
+          </label>
+        )}
+        <div className="row">
+          읽을 문장 언어 <select value={enrollLang} onChange={e => setEnrollLang(e.target.value as Lang)}>{LANGS.map(l => <option key={l} value={l}>{LANG_LABEL[l]}</option>)}</select>
+          녹음 길이 <select value={secs} onChange={e => setSecs(Number(e.target.value))}>{[5, 8, 12, 20, 30].map(s => <option key={s} value={s}>{s}초</option>)}</select>
+        </div>
+        <p className="prompt">{ENROLL_SCRIPT[enrollLang]}</p>
+        {recState === 'rec'
+          ? <button className="big rec" onClick={() => cap.current?.stop('manual')}>● 녹음 중 {elapsed.toFixed(0)} / {secs} s (탭하면 종료)</button>
+          : <button className="big" disabled={!ttsLoaded || recState !== 'idle'} onClick={enroll}>{recState === 'proc' ? '프로필 생성 중…' : '🎤 녹음 후 프로필 생성'}</button>}
+        <p className="note">최적 녹음 길이는 Phase 0에서 5/8/12/20/30초로 각각 프로필을 만들어 유사도를 청취 비교해 정합니다.</p>
+        <table className="grid">
+          <thead><tr><th>구분</th><th>이름</th><th>샘플</th><th>생성</th><th>동의</th><th></th></tr></thead>
+          <tbody>{profiles.map(p => (
+            <tr key={p.id}>
+              <td>{p.role === 'owner' ? <Badge tone="info">소유자</Badge> : <Badge tone="warn">상대방</Badge>}</td>
+              <td>{p.name}</td><td>{p.sampleSeconds.toFixed(0)} s</td><td>{new Date(p.createdAt).toLocaleString()}</td>
+              <td>{p.consentAt ? new Date(p.consentAt).toLocaleString() : '—'}</td>
+              <td><button className="danger" onClick={async () => {
+                if (!confirm(`'${p.name}' 프로필을 삭제할까요? 복구할 수 없습니다.`)) return;
+                await voiceDb.remove(p.id); await refresh();
+                const left = (await voiceDb.all()).some(x => x.id === p.id);
+                await record('voice', { deleted: p.id, verifiedGone: !left });
+              }}>삭제</button></td>
+            </tr>
+          ))}</tbody>
+        </table>
+        <KV rows={[['저장 위치', 'IndexedDB "interpreter-bench" / store "voices" (이 브라우저·이 기기 전용)'], ['주의', '브라우저 데이터 삭제·앱 제거 시 프로필은 복구할 수 없습니다.']]} />
+      </Section>
+    </>
+  );
+}
