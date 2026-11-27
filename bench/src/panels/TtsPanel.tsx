@@ -5,7 +5,7 @@ import { encodeWav, MicCapture } from '../lib/audio';
 import { voices as voiceDb, type VoiceProfile } from '../lib/db';
 import { ZONOS_SIZES_MB } from '../lib/models';
 import { currentSeq, entriesSince } from '../lib/net';
-import { AUTO_VOICE, VOICE_NAME, embedVoice, synthesizeVerified, listVoices, loadTts, synthesize, ttsFatal, type DefaultVoice, type EngineProgress, type TtsResult, type VoiceRef } from '../lib/tts';
+import { AUTO_VOICE, VOICE_NAME, embedVoice, engineMode, synthesizeVerified, listVoices, loadTts, synthesize, ttsFatal, type DefaultVoice, type EngineProgress, type TtsResult, type VoiceRef } from '../lib/tts';
 import { fmtMs, record, setState, useStore } from '../store';
 import { clearGpuRetry, gpuRetryCount, logError, logNote, logTts, scheduleGpuRetry } from '../lib/report';
 import { audioContext } from '../lib/audio';
@@ -53,11 +53,14 @@ export function TtsPanel() {
   const cap = useRef<MicCapture | null>(null);
 
   const lastProg = useRef<EngineProgress | null>(null);
+  const [stage, setStage] = useState('');
+  const lastStage = useRef('');
   const load = async () => {
     setErr(null); setProg({ models: [], loaded: 0, total: 0, fetched: 0 });
     const t0 = performance.now();
     try {
-      const r = await loadTts(p => { lastProg.current = p; setProg(p); }, setEncProg);
+      const r = await loadTts(p => { lastProg.current = p; setProg(p); }, setEncProg,
+        st => { lastStage.current = st; setStage(st); });
       const v = await listVoices();
       setDefaults(v);
       setState({ ttsLoaded: true });
@@ -66,7 +69,7 @@ export function TtsPanel() {
     } catch (e) {
       setErr(String(e) + (ttsFatal() ? `\n엔진: ${ttsFatal()}` : ''));
       const lp = lastProg.current;
-      logNote(`엔진 로드 실패 시점: ${((performance.now() - t0) / 1000).toFixed(0)}초, 마지막 진행 ${lp ? `${lp.models.join('+')} ${Math.round(lp.loaded / 1048576)}/${Math.round(lp.total / 1048576)}MB (네트워크 ${Math.round(lp.fetched / 1048576)}MB)` : '없음'}`);
+      logNote(`엔진 로드 실패 시점: ${((performance.now() - t0) / 1000).toFixed(0)}초, 시작 방식 ${engineMode()}, 마지막 단계 '${lastStage.current || '없음'}', 마지막 진행 ${lp ? `${lp.models.join('+')} ${Math.round(lp.loaded / 1048576)}/${Math.round(lp.total / 1048576)}MB (네트워크 ${Math.round(lp.fetched / 1048576)}MB)` : '없음'}`);
       logError('엔진 로드', ttsFatal() ? `${String(e)} / 엔진: ${ttsFatal()}` : e);
       setProg(null);
       if (/device lost|DeviceLost/i.test(String(e) + (ttsFatal() ?? '')) && scheduleGpuRetry()) {
@@ -76,7 +79,7 @@ export function TtsPanel() {
     }
     setProg(null);
     clearGpuRetry();
-    logNote(`엔진 로드 성공 ${((performance.now() - t0) / 1000).toFixed(0)}초`);
+    logNote(`엔진 로드 성공 ${((performance.now() - t0) / 1000).toFixed(0)}초 (시작 방식 ${engineMode()})`);
     return true;
   };
 
@@ -193,6 +196,7 @@ export function TtsPanel() {
         <p className="note">한 번 누르면 엔진을 준비하고(처음 한 번만 몇 분) 같은 문장을 한국어·일본어·영어·중국어로 차례로 들려줍니다. 끝나면 맨 위 <b>📋 결과 복사</b>를 눌러 Claude 대화창에 붙여넣기 하세요.</p>
         <button className="big" disabled={busy || !!prog} onClick={oneTap}>{busy || prog ? '진행 중… 화면을 켜 두세요' : '▶ 원클릭 테스트'}</button>
         {prog && <Progress loaded={prog.loaded} total={prog.total} label={prog.models.join('+')} />}
+        {prog && stage && <p className="note">엔진 단계: {stage}</p>}
       </section>
 
       <Section title="ZONOS3-Mini (WebGPU, 기기 내 실행)"

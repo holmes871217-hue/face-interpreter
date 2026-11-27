@@ -9,7 +9,8 @@
  * 2. App-shell cache (same-origin GETs) so the bench opens offline after the first visit.
  * 3. Optional cross-origin isolation (COOP/COEP headers on navigations) so WASM can use threads.
  */
-const VERSION = 'bench-sw-v2';
+const VERSION = 'bench-sw-v3';
+const HF_CACHE = 'bench-hf-small-v1';
 const SHELL_CACHE = 'bench-shell-v1';
 const POLICY_CACHE = 'bench-policy';
 const ALLOWED_HOST = /^(huggingface\.co|[a-z0-9-]+\.huggingface\.co|([a-z0-9-]+\.)*hf\.co)$/i;
@@ -86,6 +87,15 @@ async function handle(event, req, url, sameOrigin) {
   const base = { method, url: shortUrl(url), host: url.host, dest: req.destination || '', sameOrigin };
 
   if (!sameOrigin) {
+    // Small files of a pinned Hugging Face revision (voices, LACI heads, manifests) never change: serve them from
+    // our cache so the TTS engine starts offline and does not re-download ~100 files on every start (which also
+    // ran into HTTP 429 rate limits). Large weight shards are left alone: the engine keeps those in its own cache.
+    const pinned = method === 'GET' && ALLOWED_HOST.test(url.hostname) && /\/resolve\/[0-9a-f]{40}\//.test(url.pathname) && !/\/shard-[^/]*$|\.bin$|\.gguf$|\.onnx(_data)?$/.test(url.pathname);
+    if (pinned) {
+      const hf = await caches.open(HF_CACHE);
+      const hit = await hf.match(req.url);
+      if (hit) return hit;
+    }
     let reason = '';
     if (policy.offlineSim) reason = 'offline-simulation';
     else if (!ALLOWED_HOST.test(url.hostname)) reason = 'host-not-allowed';
@@ -98,6 +108,10 @@ async function handle(event, req, url, sameOrigin) {
     }
     try {
       const res = await fetch(req);
+      if (pinned && res.ok && (res.type === 'cors' || res.type === 'basic')) {
+        const copy = res.clone();
+        event.waitUntil(caches.open(HF_CACHE).then(c => c.put(req.url, copy)));
+      }
       const finalHost = res.url ? new URL(res.url).host : url.host;
       const redirectedOut = res.url && !ALLOWED_HOST.test(new URL(res.url).hostname);
       record({ ...base, blocked: false, status: res.status, resBytes: Number(res.headers.get('content-length') || 0),

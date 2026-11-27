@@ -9,6 +9,7 @@ interface EngineModule {
     init(progress: (p: { models: string[]; loaded: number; total: number; fetched: number }) => void, opts?: { base?: string; cache?: boolean }): Promise<void>;
     onFatal(cb: (m: string) => void): void;
     onEncoderProgress(cb: (p: { models: string[]; loaded: number; total: number; fetched: number }) => void): void;
+    onStage?(cb: (s: string) => void): void;
   };
   localFetch(input: string, init?: RequestInit): Promise<Response>;
 }
@@ -21,14 +22,23 @@ let fatal: string | null = null;
 
 export type EngineProgress = { models: string[]; loaded: number; total: number; fetched: number };
 
-export function loadTts(onProgress: (p: EngineProgress) => void, onEncoder?: (p: EngineProgress) => void): Promise<{ ms: number }> {
+/** Start-up mode: 'light' (default) skips the codec kernel timing and the reference-mode warm-up, which is where the
+ *  Galaxy S22 Ultra lost its GPU device; '?engine=full' in the page URL restores the engine's defaults. */
+export function engineMode(): 'light' | 'full' {
+  return new URLSearchParams(location.search).get('engine') === 'full' ? 'full' : 'light';
+}
+
+export function loadTts(onProgress: (p: EngineProgress) => void, onEncoder?: (p: EngineProgress) => void,
+  onStage?: (s: string) => void): Promise<{ ms: number }> {
   ready ??= (async () => {
     const t0 = performance.now();
     const url = new URL('./zonos3-engine/engine.js', document.baseURI).href;
     mod = (await import(/* @vite-ignore */ url)) as EngineModule;
     mod.engine.onFatal(m => { fatal = m; });
     if (onEncoder) mod.engine.onEncoderProgress(onEncoder);
-    await mod.engine.init(onProgress, { base: ZONOS_BASE, cache: true });
+    if (onStage) mod.engine.onStage?.(onStage);
+    const base = engineMode() === 'light' ? ZONOS_BASE + '?zacq8=1&warm=min' : ZONOS_BASE;
+    await mod.engine.init(onProgress, { base, cache: true });
     return { ms: performance.now() - t0 };
   })().catch(e => { ready = null; throw e; });
   return ready;

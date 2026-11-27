@@ -1,0 +1,127 @@
+diff --git a/servers/web/src/client.ts b/servers/web/src/client.ts
+index 7c73061..2ae8fdd 100644
+--- a/servers/web/src/client.ts
++++ b/servers/web/src/client.ts
+@@ -37,6 +37,7 @@ let initReject: ((e: Error) => void) | null = null;
+ let onProgress: ((p: Progress) => void) | null = null;
+ const fatalCbs: ((m: string) => void)[] = [];
+ const encoderCbs: ((p: Progress) => void)[] = [];
++const stageCbs: ((s: string) => void)[] = [];
+ 
+ const send = (m: InMsg, transfer: Transferable[] = []) => worker.postMessage(m, transfer);
+ 
+@@ -49,6 +50,9 @@ worker.onmessage = (ev: MessageEvent<OutMsg>) => {
+       else for (const cb of encoderCbs) cb(p);
+       break;
+     }
++    case 'stage':
++      for (const cb of stageCbs) cb(m.stage);
++      break;
+     case 'ready':
+       ready = true;
+       initResolve?.();
+@@ -147,6 +151,8 @@ export const engine = {
+   },
+   onFatal(cb: (m: string) => void): void { fatalCbs.push(cb); },
+   onEncoderProgress(cb: (p: Progress) => void): void { encoderCbs.push(cb); },
++  /** [face-interpreter patch] Start-up steps as they begin ('gpu', 'weights', ..., '준비 완료'). */
++  onStage(cb: (s: string) => void): void { stageCbs.push(cb); },
+ };
+ 
+ /** The route's audio field of a JSON body decoded to 44.1 kHz mono (at most the route's maxSeconds) and the upload's
+diff --git a/servers/web/src/worker.ts b/servers/web/src/worker.ts
+index 8043899..d02580d 100644
+--- a/servers/web/src/worker.ts
++++ b/servers/web/src/worker.ts
+@@ -34,6 +34,7 @@ export type OutMsg =
+   | ({ type: 'progress' } & LoadProgress)
+   | { type: 'ready' }
+   | { type: 'fatal'; message: string }
++  | { type: 'stage'; stage: string }
+   | { type: 'res'; id: number; status: number; headers: Record<string, string> }
+   | { type: 'chunk'; id: number; data: ArrayBuffer }
+   | { type: 'end'; id: number };
+@@ -148,8 +149,17 @@ async function decoderList(gpu: Gpu, base: string, cache: boolean, zac: ZacStrea
+ }
+ 
+ async function init(base: string, cache: boolean, voicesPcm: Record<string, Float32Array>, codecPort: MessagePort): Promise<void> {
++  // [face-interpreter patch] Optional lighter start-up for phones, read from the models URL's query string
++  // (relative model paths resolve without it): zacq8=1 keeps the q8 codec kernels instead of timing the f16 ones,
++  // warm=min|off shrinks or skips the warm-up. Each step is reported as a 'stage' message.
++  const flags = new URL(base).searchParams;
++  const zacQ8 = flags.get('zacq8') === '1';
++  const warmMode = (flags.get('warm') ?? 'full') as 'full' | 'min' | 'off';
++  const stage = (s: string) => post({ type: 'stage', stage: s });
++  stage('gpu');
+   const device = await initGpu(message => post({ type: 'fatal', message }));
+   const gpu = new Gpu(device);
++  const settle = async (s: string) => { await device.queue.onSubmittedWorkDone(); stage(s); };
+   const progress = (p: LoadProgress) => post({ type: 'progress', ...p });
+   const voicesBase = new URL('voices/', base).href;
+   const voicesRaw = await fetchJson<{ id: string; label: string; file: string; codes: string; embedding: string }[]>(
+@@ -162,6 +172,7 @@ async function init(base: string, cache: boolean, voicesPcm: Record<string, Floa
+   };
+   const voiceFiles = Promise.all(voicesRaw.map(v => Promise.all([fetchBytes(v.codes), fetchBytes(v.embedding)])));
+   // backbone + zac as one readout (one bar, one ETA), in the order they load.
++  stage('weights');
+   const boot = await batchProgress(base, ['backbone', 'zac'], progress);
+   const bbw = await loadModel(gpu, base, 'backbone', boot, cache);
+   const zacw = await loadModel(gpu, base, 'zac', boot, cache);
+@@ -174,6 +185,7 @@ async function init(base: string, cache: boolean, voicesPcm: Record<string, Floa
+     };
+   });
+ 
++  await settle('companions');
+   const steerBuf = await companion(base, 'steer.gguf');
+   const steer: SteerBundle | null = steerBuf
+     ? loadSteer(parseGguf(steerBuf), { nEmbd: hp.nEmbd, nLayer: hp.nLayer, speakerDim: hp.speakerDim }) : null;
+@@ -181,11 +193,17 @@ async function init(base: string, cache: boolean, voicesPcm: Record<string, Floa
+ 
+   const steerSources = steer ? steer.sources : [];
+   const backbone = new Backbone(gpu, bbw, steerSources);
+-  const zac = await ZacStream.create(gpu, zacw, p => new RemoteSpecSink(codecPort, p));
++  await settle(zacQ8 ? 'codec (q8 고정)' : 'codec 커널 시험');
++  const zac = await ZacStream.create(gpu, zacw, p => new RemoteSpecSink(codecPort, p),
++    zacQ8 ? { skinny: 'q8', large: 'q8' } : undefined);
+   const tokenizer = createTokenizer();
+-  await warmup(backbone, zac, hp);
++  await settle(`예열(${warmMode})`);
++  if (warmMode !== 'off') await warmup(backbone, zac, hp, warmMode === 'min', settle);
++  await settle('edit');
+   const edit = await editModels(gpu, base, cache, backbone, progress);
++  await settle('decoders');
+   const decoders = await decoderList(gpu, base, cache, zac, zacw.meta, codecPort, progress);
++  await settle('준비 완료');
+ 
+   let spk: Promise<SpeakerEncoder> | null = null;
+   let ref: Promise<RefEncoder> | null = null;
+@@ -208,20 +226,26 @@ async function init(base: string, cache: boolean, voicesPcm: Record<string, Floa
+ /** Runs every program the first request needs once (both slots' prefill tiles, the cached 256-row chunk program plus a
+  *  remainder via a 309-row reference prompt, a sampled decode step alone and as a CFG pair, a full codec chunk) so
+  *  pipeline compilation and first-use costs land before 'ready' instead of in the first request. */
+-async function warmup(backbone: Backbone, zac: ZacStream, hp: ModelHp): Promise<void> {
++async function warmup(backbone: Backbone, zac: ZacStream, hp: ModelHp, min = false,
++                      settle: (s: string) => Promise<void> = async () => {}): Promise<void> {
+   const tok = createTokenizer();
+   const short = buildPrompt(tok, 'Hi.', { buckets: [], silencePrefill: 3 }, hp);
+   const ref = buildPrompt(tok, 'Hi.', { referenceCodes: new Int32Array(300 * NCB), buckets: [], silencePrefill: 3 }, hp);
+-  for (const slot of [0, 1] as const) {
++  for (const slot of (min ? [0] : [0, 1]) as (0 | 1)[]) {
+     await backbone.prefill(slot, short.ids, short.cond);
++    await settle(`예열: 짧은 prefill slot${slot}`);
++    if (min) continue;   // the 309-row reference prompt only serves raw-reference cloning
+     await backbone.prefill(slot, ref.ids, ref.cond);
++    await settle(`예열: 309행 prefill slot${slot}`);
+   }
+-  for (const cfgScale of [null, 1.5]) {
++  for (const cfgScale of (min ? [null] : [null, 1.5])) {
+     backbone.startSampling({ sp: defaultSampling(), minFrames: 0, cfgScale });
+     await backbone.sampleFirst(0);
+     await backbone.stepSample(1, null, null, null);
++    await settle(`예열: 샘플링 cfg=${cfgScale}`);
+   }
+   await warmCodec(zac);
++  await settle('예열: 코덱');
+ }
+ 
+ /** A full codec chunk, then a reset: the decoder's pipelines compile before its first request. */
