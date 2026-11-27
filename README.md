@@ -7,6 +7,9 @@
 
 | 경로 | 내용 |
 | --- | --- |
+| `CLAUDE.md` | 새 작업 세션용 안내(작업 방식, 배포 흐름, 원칙) |
+| `docs/SPEC.md` | 원본 기획서 |
+| `docs/STATUS.md` | 현재 진행 상황과 다음 할 일 |
 | `docs/PHASE0_REPORT.md` | 후보 모델 조사(출처 포함), 컨테이너 검증 결과, 실기기 측정 절차, 미해결 사항 |
 | `bench/` | Phase 0 벤치마크 PWA (Vite + React + TypeScript) |
 | `bench/vendor/zonos3-engine/` | Zyphra 공식 ZONOS3-Mini 브라우저 엔진 빌드본(MIT, 커밋 고정) |
