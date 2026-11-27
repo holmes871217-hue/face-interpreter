@@ -9,7 +9,7 @@
  * 2. App-shell cache (same-origin GETs) so the bench opens offline after the first visit.
  * 3. Optional cross-origin isolation (COOP/COEP headers on navigations) so WASM can use threads.
  */
-const VERSION = 'bench-sw-v1';
+const VERSION = 'bench-sw-v2';
 const SHELL_CACHE = 'bench-shell-v1';
 const POLICY_CACHE = 'bench-policy';
 const ALLOWED_HOST = /^(huggingface\.co|[a-z0-9-]+\.huggingface\.co|([a-z0-9-]+\.)*hf\.co)$/i;
@@ -118,7 +118,9 @@ async function handle(event, req, url, sameOrigin) {
   const cache = await caches.open(SHELL_CACHE);
   let res;
   try {
-    res = await fetch(req);
+    // GitHub Pages sends max-age=600: revalidate the page itself so a new deploy shows up on the next reload.
+    // Hashed assets keep normal HTTP caching.
+    res = await fetch(req, isNav || /\/(sw\.js|manifest\.webmanifest)$/.test(url.pathname) ? { cache: 'no-cache' } : undefined);
     if (res.ok && res.type === 'basic') event.waitUntil(cache.put(req, res.clone()));
   } catch {
     res = await cache.match(req, { ignoreSearch: isNav });

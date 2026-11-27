@@ -52,10 +52,12 @@ export function TtsPanel() {
   const [elapsed, setElapsed] = useState(0);
   const cap = useRef<MicCapture | null>(null);
 
+  const lastProg = useRef<EngineProgress | null>(null);
   const load = async () => {
     setErr(null); setProg({ models: [], loaded: 0, total: 0, fetched: 0 });
+    const t0 = performance.now();
     try {
-      const r = await loadTts(setProg, setEncProg);
+      const r = await loadTts(p => { lastProg.current = p; setProg(p); }, setEncProg);
       const v = await listVoices();
       setDefaults(v);
       setState({ ttsLoaded: true });
@@ -63,6 +65,8 @@ export function TtsPanel() {
       await record('load', { component: 'tts', model: 'ZONOS3-Mini web', ms: r.ms, defaultVoices: v.length });
     } catch (e) {
       setErr(String(e) + (ttsFatal() ? `\n엔진: ${ttsFatal()}` : ''));
+      const lp = lastProg.current;
+      logNote(`엔진 로드 실패 시점: ${((performance.now() - t0) / 1000).toFixed(0)}초, 마지막 진행 ${lp ? `${lp.models.join('+')} ${Math.round(lp.loaded / 1048576)}/${Math.round(lp.total / 1048576)}MB (네트워크 ${Math.round(lp.fetched / 1048576)}MB)` : '없음'}`);
       logError('엔진 로드', ttsFatal() ? `${String(e)} / 엔진: ${ttsFatal()}` : e);
       setProg(null);
       if (/device lost|DeviceLost/i.test(String(e) + (ttsFatal() ?? '')) && scheduleGpuRetry()) {
@@ -72,6 +76,7 @@ export function TtsPanel() {
     }
     setProg(null);
     clearGpuRetry();
+    logNote(`엔진 로드 성공 ${((performance.now() - t0) / 1000).toFixed(0)}초`);
     return true;
   };
 
